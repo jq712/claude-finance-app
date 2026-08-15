@@ -1,0 +1,41 @@
+# Secrets — never commit. .env.example is the only tracked env file.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.credential
+credentials.json
+
+# Plaid / financial artifacts that must never land in Git
+*.plaid.json
+plaid_access_token*
+transactions_export*
+*.dump
+*.sql.gz
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Tooling
+.DS_Store
+*.swp
+node_modules/
+
+# Claude Code — share settings.json and agents/skills, keep personal overrides local
+.claude/settings.local.json
