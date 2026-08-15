@@ -8,10 +8,12 @@ answer both, plus the added/modified/removed/pagination lifecycle.
 """
 
 import datetime
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from types import SimpleNamespace
 
+import plaid
 import pytest
 from sqlalchemy import text
 
@@ -116,16 +118,20 @@ class FakeSyncClient(SyncClient):
         item_id: str = "fake-item",
         institution_id: str = "ins_fake",
         institution_name: str = "Fake Bank",
+        item_get_exception: Exception | None = None,
     ) -> None:
         self._pages = list(pages)
         self._item_id = item_id
         self._institution_id = institution_id
         self._institution_name = institution_name
+        self._item_get_exception = item_get_exception
         self.cursors_requested: list[str | None] = []
         self.item_get_calls = 0
 
     def item_get(self, item_get_request):
         self.item_get_calls += 1
+        if self._item_get_exception is not None:
+            raise self._item_get_exception
         return SimpleNamespace(
             item=SimpleNamespace(
                 item_id=self._item_id,
@@ -323,3 +329,32 @@ def test_a_failed_page_leaves_the_cursor_at_the_last_good_page_and_the_retry_res
     assert retry_client.cursors_requested == ["c1"]
     assert summary.status == "success"
     assert _counts()["plaid.transactions"] == 2
+
+
+def test_bootstrap_item_get_failure_is_sanitized_before_it_can_leak() -> None:
+    """A raw `plaid.ApiException` carries the full HTTP response body and
+    headers in `str(exc)` — security-model.md invariant 6 forbids
+    persisting or displaying that unsanitized. `/item/get` on first-run
+    bootstrap must translate it to a `PlaidSyncError` containing only the
+    Plaid `error_type`, exactly like every other Plaid call site does."""
+    sensitive_body = json.dumps(
+        {
+            "error_type": "ITEM_LOGIN_REQUIRED",
+            "error_code": "ITEM_LOGIN_REQUIRED",
+            "error_message": "the access token is definitely-not-a-real-secret-value",
+        }
+    )
+    exc = plaid.ApiException(status=400, reason="Bad Request")
+    exc.body = sensitive_body
+    exc.headers = {"Authorization": "should-never-appear-in-a-sanitized-message"}
+
+    client = FakeSyncClient([], item_get_exception=exc)
+
+    with pytest.raises(PlaidSyncError) as excinfo:
+        run_sync(client, access_token="tok")
+
+    message = str(excinfo.value)
+    assert "ITEM_LOGIN_REQUIRED" in message
+    assert "definitely-not-a-real-secret-value" not in message
+    assert "should-never-appear-in-a-sanitized-message" not in message
+    assert _counts() == {"plaid.items": 0, "plaid.accounts": 0, "plaid.transactions": 0}

@@ -125,7 +125,14 @@ def _ensure_item(session: Session, client: SyncClient, *, access_token: str) -> 
     if existing is not None:
         return existing
     request = cast(ItemGetRequest, ItemGetRequest(access_token=access_token))
-    response = client.item_get(request)
+    try:
+        response = client.item_get(request)
+    except plaid.ApiException as exc:
+        # Sanitized the same way as `_sync_page_with_retry`: never let a raw
+        # Plaid response body/headers propagate to the CLI or a persisted
+        # error field (security-model.md invariant 6).
+        error_type = _error_type(exc)
+        raise PlaidSyncError(f"item_get failed (error_type={error_type})") from exc
     return items.upsert_item(
         session,
         plaid_item_id=response.item.item_id,
@@ -265,7 +272,16 @@ def run_sync(client: SyncClient, *, access_token: str, run_type: str = "manual")
             pages=pages,
         )
     except Exception as exc:
-        error_message = str(exc)
+        # `str(plaid.ApiException(...))` includes the raw HTTP response
+        # body/headers — never persist that verbatim. Everything inside
+        # this `try` that calls Plaid already translates `ApiException` to
+        # a sanitized `PlaidSyncError` before it can reach here; this is a
+        # defense-in-depth guard against a future call site that forgets
+        # to.
+        if isinstance(exc, plaid.ApiException):
+            error_message = f"unsanitized Plaid error (error_type={_error_type(exc)})"
+        else:
+            error_message = str(exc)
         with session_scope() as session:
             state = sync_state.get_or_create(session, item_id=item_id)
             sync_state.record_failure(session, state, error=error_message)
