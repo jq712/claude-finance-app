@@ -2,7 +2,7 @@
 
 A single-user, headless financial intelligence application. One Plaid Item → PostgreSQL → deterministic analytics → a CLI plus a conversational financial agent, running on one Linux VPS.
 
-**Status:** Milestone 1 complete. Database schema, SQLAlchemy models, Alembic migrations, and the least-privilege role/grant model are in place and independently reviewed; Plaid ingestion (Milestone 2+) does not exist yet. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan and [`docs/database.md`](docs/database.md) for the schema.
+**Status:** Milestone 2 complete. Plaid `/transactions/sync` ingestion — client abstraction, durable cursor, added/modified/removed handling, retry, sync-run audit trail, and the `finance sync` CLI command — is in place; deterministic analytics (Milestone 3+) does not exist yet. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, and [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design.
 
 ## The core idea
 
@@ -64,7 +64,7 @@ uv run ruff format . && uv run ruff check .
 uv run pyright
 ```
 
-The next task is Milestone 2: Plaid client abstraction, Sandbox configuration, `/transactions/sync` with a durable cursor, and sync-run audit state. Start a Claude Code session in this directory and:
+The next task is Milestone 3: deterministic analytics (spending, income, cash flow, category/budget calculations) over the `plaid.*` data Milestone 2 now keeps in sync. Start a Claude Code session in this directory and:
 
 ```text
 Continue executing CLAUDE_FINANCE_APP_HANDOFF.md from the first incomplete milestone.
