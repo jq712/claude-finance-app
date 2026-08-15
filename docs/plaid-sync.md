@@ -79,6 +79,23 @@ the operator-visible error. Every retry re-requests the *same* cursor, so a
 retry cannot skip data even if an earlier attempt partially succeeded on
 Plaid's side. See `_sync_page_with_retry` in `plaid/sync.py`.
 
+### Concurrency
+
+`run_sync` holds a Postgres advisory lock (`pg_try_advisory_lock`) for its
+entire duration, keyed on a single fixed value — there is only ever one
+Plaid Item, so only one sync ever needs to be serialized (handoff §6.4,
+which names advisory locks as the right single-host mechanism). A second
+invocation — a systemd timer firing while a manual `finance sync` is still
+running, say — fails fast with `PlaidSyncError` rather than blocking or
+proceeding. Without this, two overlapping runs would each read
+`plaid.sync_state.cursor` independently and later write their own
+`next_cursor` back unconditionally; the slower run's write landing after
+the faster run's would silently regress the cursor to an earlier point,
+corrupting where the *next* sync resumes even though no transaction row
+would be lost or duplicated. See
+`test_concurrent_sync_invocations_fail_fast_instead_of_regressing_the_cursor`
+in `tests/integration/test_plaid_sync.py`.
+
 ### Audit trail
 
 Every `run_sync()` invocation writes one `ops.sync_runs` row (`run_type`:
@@ -88,7 +105,7 @@ counts, the last Plaid `request_id`, and success/error status — read by
 is `run_type="manual"`; `run_daily_sync()`, the systemd-timer entry point,
 is `run_type="scheduled"`.
 
-### Known limitation
+### Known limitations
 
 If Plaid ever reports a `removed` event for a transaction id this database
 has not seen yet (out-of-order delivery across a restart boundary), the
@@ -98,6 +115,15 @@ existing repository-layer behavior documented in
 `tests/integration/test_transaction_repository_adversarial.py` and has not
 been observed to occur within a single cursor stream in practice; revisit
 if reconciliation ever surfaces it.
+
+A process killed between the last page's commit and the final
+`record_success`/`finish_success` calls leaves `plaid.sync_state.status`
+and `ops.sync_runs.status` stuck at `"running"` forever, even though the
+cursor and every row are already correct and durably committed — this is
+an observability gap (`finops sync-status`, once it exists, could
+misreport a completed sync as hung), not a correctness bug: no data is
+lost, no row is duplicated, and the next real sync proceeds normally.
+Revisit if it causes operator confusion in practice.
 
 ## Not yet built
 

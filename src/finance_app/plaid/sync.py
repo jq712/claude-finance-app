@@ -19,10 +19,25 @@ re-fetches/re-processes that page. Re-processing is safe because:
 Per Plaid's guidance, a failed page is retried from the cursor that was
 current *before* that page's request, never from a `next_cursor` whose
 page might not have been durably processed.
+
+Concurrency (handoff §6.4): `run_sync` holds a Postgres advisory lock for
+its entire duration, released on any exit. Without it, two overlapping
+invocations (a systemd timer firing while a manual `finance sync` is still
+running, say) each read `plaid.sync_state.cursor` independently and later
+write their own `next_cursor` back unconditionally — the slower run's
+write can land after the faster one's and silently regress the cursor to
+an earlier point, corrupting where the *next* sync resumes even though no
+transaction row is lost or duplicated. A single fixed lock key is
+sufficient because this application connects exactly one Plaid Item
+(handoff §2) — there is only ever one sync to serialize. A second
+invocation fails fast with `PlaidSyncError` rather than blocking, which
+matches this being a single-user, single-host system: queueing a second
+run only delays discovering that one was already in flight.
 """
 
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol, cast
@@ -33,6 +48,7 @@ from plaid.model.item_get_request import ItemGetRequest
 from plaid.model.item_get_response import ItemGetResponse
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from plaid.model.transactions_sync_response import TransactionsSyncResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from finance_app.config.settings import get_settings
@@ -40,7 +56,7 @@ from finance_app.db.models.ops import SyncRun
 from finance_app.db.models.plaid import Item
 from finance_app.db.repositories import accounts, items, sync_runs, sync_state, transactions
 from finance_app.db.repositories.transactions import TransactionFields
-from finance_app.db.session import session_scope
+from finance_app.db.session import get_engine, session_scope
 from finance_app.plaid.client import build_client
 
 logger = logging.getLogger(__name__)
@@ -48,6 +64,33 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_ERROR_TYPES = {"RATE_LIMIT_EXCEEDED", "API_ERROR"}
 _MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 1.0
+
+# Arbitrary fixed key for the single-item sync advisory lock. Session-level
+# (not transaction-level) because it must span every short-lived
+# `session_scope()` transaction for the whole run_sync() call, not just one.
+_SYNC_LOCK_KEY = 0x66696E616E6373 & 0x7FFFFFFF  # "financs" truncated to fit a signed 32-bit int
+
+
+@contextmanager
+def _single_sync_lock():
+    """Fails fast with `PlaidSyncError` if another sync already holds the
+    lock, rather than blocking — see the module docstring's Concurrency
+    section."""
+    conn = get_engine().connect()
+    try:
+        acquired = conn.execute(
+            text("SELECT pg_try_advisory_lock(:key)"), {"key": _SYNC_LOCK_KEY}
+        ).scalar_one()
+        if not acquired:
+            conn.close()
+            raise PlaidSyncError("a sync is already in progress for this item")
+        try:
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SYNC_LOCK_KEY})
+            conn.commit()
+    finally:
+        conn.close()
 
 
 class SyncClient(Protocol):
@@ -86,12 +129,20 @@ def _error_type(exc: plaid.ApiException) -> str | None:
     return body.get("error_type")
 
 
+# Transport-level failures (DNS, connection reset, read timeout) that the
+# Plaid SDK does not wrap as `plaid.ApiException` — these are exactly as
+# transient as a retryable Plaid error and must not bypass retry, and must
+# not escape as an exception type the CLI doesn't know to catch.
+_TRANSIENT_TRANSPORT_ERRORS = (ConnectionError, TimeoutError, OSError)
+
+
 def _sync_page_with_retry(
     client: SyncClient, *, access_token: str, cursor: str | None
 ) -> TransactionsSyncResponse:
     """Calls `/transactions/sync` for one page, retrying transient Plaid
-    errors with backoff. Always retries from the same `cursor` — never a
-    partially-received `next_cursor` — so a retry cannot skip data."""
+    and transport errors with backoff. Always retries from the same
+    `cursor` — never a partially-received `next_cursor` — so a retry
+    cannot skip data."""
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
@@ -111,6 +162,17 @@ def _sync_page_with_retry(
             logger.warning(
                 "plaid.transactions_sync transient error, retrying",
                 extra={"attempt": attempt, "error_type": error_type},
+            )
+            time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
+        except _TRANSIENT_TRANSPORT_ERRORS as exc:
+            last_exc = exc
+            if attempt == _MAX_ATTEMPTS:
+                raise PlaidSyncError(
+                    f"transactions_sync failed (transport error: {type(exc).__name__})"
+                ) from exc
+            logger.warning(
+                "plaid.transactions_sync transport error, retrying",
+                extra={"attempt": attempt, "error": type(exc).__name__},
             )
             time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
     raise PlaidSyncError("transactions_sync failed") from last_exc
@@ -175,7 +237,14 @@ def run_sync(client: SyncClient, *, access_token: str, run_type: str = "manual")
     configured Item, recording an `ops.sync_runs` audit row and advancing
     `plaid.sync_state` page by page. Raises `PlaidSyncError` on failure;
     the audit row and sync state are still updated to reflect the failure
-    before the exception propagates."""
+    before the exception propagates. Fails fast with `PlaidSyncError` if
+    another sync is already in progress — see the module docstring's
+    Concurrency section."""
+    with _single_sync_lock():
+        return _run_sync_locked(client, access_token=access_token, run_type=run_type)
+
+
+def _run_sync_locked(client: SyncClient, *, access_token: str, run_type: str) -> SyncRunSummary:
     with session_scope() as session:
         item = _ensure_item(session, client, access_token=access_token)
         item_id = item.id

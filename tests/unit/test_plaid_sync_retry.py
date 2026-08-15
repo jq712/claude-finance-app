@@ -83,19 +83,32 @@ def test_exhausts_retries_and_raises() -> None:
     assert client.calls == 3
 
 
-def test_non_api_exception_bypasses_retry_entirely() -> None:
-    """`_sync_page_with_retry` only catches `plaid.ApiException`. A raw
-    transport-level failure that the SDK does not wrap as an `ApiException`
-    (a DNS failure, a connection reset, a read timeout surfaced as a bare
-    `ConnectionError`/`TimeoutError`) is therefore not retried at all -- it
-    propagates immediately as its original type on the very first attempt,
-    contrary to the module's stated intent of retrying transient failures.
-    It also isn't wrapped as `PlaidSyncError`, so a caller that only catches
-    `PlaidSyncError` (as `finance sync`'s CLI handler does) would not catch
-    this and would crash with an unhandled exception instead."""
-    client = _FlakyClient([ConnectionError("connection reset by peer")], object())
+def test_transport_error_is_retried_then_succeeds() -> None:
+    """A raw transport-level failure that the SDK does not wrap as
+    `plaid.ApiException` (a DNS failure, a connection reset, a read
+    timeout surfaced as a bare `ConnectionError`/`TimeoutError`/`OSError`)
+    is exactly as transient as a retryable Plaid error and must be retried
+    the same way, not bypass retry and escape as an unexpected type."""
+    sentinel = object()
+    client = _FlakyClient([ConnectionError("connection reset by peer")], sentinel)
 
-    with pytest.raises(ConnectionError):
+    result = _sync_page_with_retry(client, access_token="tok", cursor=None)
+
+    assert result is sentinel
+    assert client.calls == 2
+
+
+def test_transport_error_exhausts_retries_and_raises_sanitized_error() -> None:
+    client = _FlakyClient(
+        [
+            TimeoutError("read timed out"),
+            ConnectionError("connection reset by peer"),
+            OSError("network unreachable"),
+        ],
+        object(),
+    )
+
+    with pytest.raises(PlaidSyncError):
         _sync_page_with_retry(client, access_token="tok", cursor=None)
 
-    assert client.calls == 1, "no retry attempted for a non-ApiException failure"
+    assert client.calls == 3

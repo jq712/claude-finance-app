@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import text
 
 from finance_app.db.session import get_sessionmaker, session_scope
-from finance_app.plaid.sync import PlaidSyncError, SyncClient, run_sync
+from finance_app.plaid.sync import PlaidSyncError, SyncClient, SyncRunSummary, run_sync
 
 pytestmark = pytest.mark.integration
 
@@ -368,18 +368,16 @@ def test_bootstrap_item_get_failure_is_sanitized_before_it_can_leak() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_sync_invocations_can_regress_the_durable_cursor() -> None:
-    """Nothing — no row lock, no `SELECT ... FOR UPDATE`, no advisory lock —
-    stops two `run_sync` invocations from being in flight at once (e.g. a
-    systemd timer firing while a manual `finance sync` is still running).
-    Each reads `plaid.sync_state.cursor` at the top of its own page loop and
-    later writes its *own* `next_cursor` back unconditionally. This forces
-    a deterministic interleaving — run B reads the pre-run cursor, then
-    blocks on the Plaid call until run A has completed two pages end to
-    end — and shows B's stale, less-advanced cursor unconditionally
-    overwrites A's fully-committed progress. Both runs individually report
-    `status == "success"`; only the shared `plaid.sync_state` row ends up
-    wrong."""
+def test_concurrent_sync_invocations_fail_fast_instead_of_regressing_the_cursor() -> None:
+    """Two overlapping `run_sync` invocations (e.g. a systemd timer firing
+    while a manual `finance sync` is still running) used to interleave: each
+    read `plaid.sync_state.cursor` independently and later wrote its own
+    `next_cursor` back unconditionally, letting a slower run's stale write
+    land after a faster run's and silently regress the cursor — see
+    `docs/plaid-sync.md`'s Concurrency section. `run_sync` now holds a
+    Postgres advisory lock for its whole duration; a second invocation must
+    fail fast with `PlaidSyncError` rather than proceed and corrupt shared
+    state."""
     b_reached_network = threading.Event()
     b_may_finish = threading.Event()
 
@@ -414,46 +412,40 @@ def test_concurrent_sync_invocations_can_regress_the_durable_cursor() -> None:
             _Page(
                 accounts=[_fake_account()],
                 added=[_fake_txn("txn-b1")],
-                next_cursor="cB1-stale",
+                next_cursor="cB1",
                 has_more=False,
             )
         ]
     )
 
-    results: dict[str, object] = {}
+    b_results: list[SyncRunSummary] = []
 
     def _run_b() -> None:
-        results["b"] = run_sync(b_client, access_token="tok", run_type="scheduled")
+        b_results.append(run_sync(b_client, access_token="tok", run_type="scheduled"))
 
     b_thread = threading.Thread(target=_run_b)
     b_thread.start()
     assert b_reached_network.wait(timeout=5), "run B never reached its network call"
 
-    results["a"] = run_sync(a_client, access_token="tok", run_type="manual")
+    # B holds the advisory lock for its entire run, including while it is
+    # blocked mid-page here — A must fail fast rather than block or proceed.
+    with pytest.raises(PlaidSyncError, match="already in progress"):
+        run_sync(a_client, access_token="tok", run_type="manual")
 
     b_may_finish.set()
     b_thread.join(timeout=5)
     assert not b_thread.is_alive(), "run B did not finish"
-
-    assert results["a"].status == "success"
-    assert results["b"].status == "success"
+    assert b_results[0].status == "success"
 
     Session = get_sessionmaker()
     with Session() as session:
         cursor = session.execute(text("SELECT cursor FROM plaid.sync_state")).scalar_one()
 
-    # A fully processed two pages (txn-a1, txn-a2) and durably advanced the
-    # cursor to "cA2" before B's blocked write ever landed. B's write is
-    # unconditional, so it stomps the cursor back to its own page's
-    # next_cursor -- a value that does *not* reflect A's committed work.
-    # The next real sync will resume from "cB1-stale" instead of "cA2",
-    # re-requesting data Plaid has already delivered and durably committed.
-    assert cursor == "cB1-stale", (
-        "expected B's unconditional write to regress the cursor behind A's "
-        "already-committed progress; got a cursor that suggests the race "
-        "did not land as constructed -- re-check the event ordering"
-    )
-    assert _counts()["plaid.transactions"] == 3, "both runs' rows are present (upserts are safe)"
+    # A never wrote anything -- it was rejected before touching the
+    # database at all -- so B's cursor and rows are exactly as B left them.
+    assert cursor == "cB1"
+    assert _counts()["plaid.transactions"] == 1
+    assert a_client.item_get_calls == 0, "A must be rejected before it ever calls Plaid"
 
 
 def test_a_later_page_with_no_accounts_list_still_resolves_a_previously_seen_account() -> None:
