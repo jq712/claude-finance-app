@@ -13,7 +13,7 @@ All financial computation — sums, averages, medians, percentage change, budget
 ## Consequences
 
 - Every figure the agent reports is reproducible and traceable to a query.
-- The application stays fully useful with OpenAI unavailable (ADR: see Milestone 4 exit criteria).
+- The application stays fully useful with the runtime LLM provider unavailable, whichever one is configured (ADR: see Milestone 4 exit criteria; ADR-014).
 - Agent evals can assert exact numeric equality against a golden synthetic dataset.
 - Reviewers have one clear smell to watch for: any prompt asking the model to compute.
 

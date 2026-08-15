@@ -13,8 +13,8 @@ A secure, single-user, headless financial intelligence application. One Plaid It
 - PostgreSQL (schemas: `plaid`, `user`, `finance`, `agent`, `ops`)
 - SQLAlchemy 2.x + psycopg, Alembic migrations
 - Typer + Rich CLI; `finance` (user) and `finops` (operations)
-- OpenAI models power the **runtime** financial agent
-- Claude Code is the **engineering** agent — these are different systems, do not conflate them
+- The **runtime** financial agent is provider-interchangeable (OpenAI or the Claude API, via `AGENT_PROVIDER`) — see ADR-014 and handoff §8.4
+- Claude Code is the **engineering** agent — always a different system from the runtime agent, even when the runtime agent is configured to use a Claude-family model. Never conflate them.
 - Plaid Transactions Sync (incremental, cursor-based), daily systemd timer
 - Docker + Compose, single Linux VPS, no Kubernetes
 
@@ -58,7 +58,7 @@ The model explains numbers; it never produces them. Every numeric claim the agen
 
 ## Agent tool boundary
 
-The runtime financial agent gets **semantic, parameterized tools** only — `get_spending_by_category`, `create_budget`, etc. There is no `run_sql(query: str)` and there never will be. Write tools validate inputs, are audited to `agent.tool_calls`, and touch only `user.*`, `finance.*`, and `agent.*`.
+The runtime financial agent gets **semantic, parameterized tools** only — `get_spending_by_category`, `create_budget`, etc. There is no `run_sql(query: str)` and there never will be. Write tools validate inputs, are audited to `agent.tool_calls`, and touch only `user.*`, `finance.*`, and `agent.*`. Tool definitions are provider-neutral — defined once, translated to each provider's wire format by its adapter (ADR-014) — never hand-duplicated per provider.
 
 ## Risk classes (see handoff §25)
 
