@@ -1,0 +1,23 @@
+# Isolated development/test PostgreSQL. Synthetic credentials only — never
+# point this at a production database. Used by local `finance` commands,
+# pytest integration tests, and CI.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: finance-app-postgres-dev
+    environment:
+      POSTGRES_USER: finance_app
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: finance_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - finance-app-postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance_app -d finance_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  finance-app-postgres-dev-data:
