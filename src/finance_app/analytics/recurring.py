@@ -48,11 +48,23 @@ def find_recurring_transactions(
 
     txns = fetch_effective_transactions(session, start=window_start, end=window_end)
 
+    # Plaid's merchant-name enrichment is probabilistic and can be present
+    # for a transaction one month and absent the next, for the same real
+    # merchant and the same raw `name` description. Grouping strictly by
+    # `merchant_name or name` would then split one recurring series into
+    # two, each below the occurrence threshold. Resolve every occurrence of
+    # a given raw `name` to the same key by preferring any `merchant_name`
+    # ever seen for that `name` within the window.
+    name_to_merchant: dict[str, str] = {}
+    for t in txns:
+        if t.merchant_name and t.name not in name_to_merchant:
+            name_to_merchant[t.name] = t.merchant_name
+
     by_merchant: dict[str, list[tuple[datetime.date, Decimal]]] = {}
     for t in txns:
         if t.is_transfer or t.is_income:
             continue
-        label = t.merchant_name or t.name
+        label = t.merchant_name or name_to_merchant.get(t.name) or t.name
         by_merchant.setdefault(label, []).append((t.date, t.amount))
 
     results: list[RecurringMerchant] = []

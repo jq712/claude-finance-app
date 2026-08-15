@@ -12,18 +12,23 @@ written, by this module — supplies the interpretation layered on top.
 Transfers between the user's own accounts and income deposits are
 excluded from spending totals (handoff §30: "transfers not double-counted
 as spending/income"). Both classifications are read from the *raw* Plaid
-category by default, but an override always wins: if the user corrects a
-transaction Plaid classified as an internal transfer to a real spending
-category, analytics must honor that correction, not the original
-(possibly wrong) Plaid classification. This is why an override also
-clears `is_transfer`/`is_income` rather than leaving them derived from the
-now-superseded raw label.
+category by default, but an override always wins in *either* direction:
+if the user corrects a transaction Plaid classified as an internal
+transfer to a real spending category, analytics must honor that
+correction rather than the original (possibly wrong) Plaid
+classification — and symmetrically, if the user explicitly labels a
+transaction "Transfer" or "Income" (case-insensitively; overrides come
+from free text, an agent tool, or a CLI flag with no enforced casing),
+that must exclude it from spending exactly as a raw Plaid transfer/income
+classification would. An override is compared against these sentinel
+category names case-insensitively for this reason.
 """
 
 from dataclasses import dataclass
 
 _TRANSFER_LEGACY_CATEGORIES = {"Transfer"}
 _TRANSFER_PFC_PRIMARIES = {"TRANSFER_IN", "TRANSFER_OUT"}
+_TRANSFER_OVERRIDE_NAMES = {c.casefold() for c in _TRANSFER_LEGACY_CATEGORIES}
 
 _INCOME_LEGACY_CATEGORIES = {"Payroll", "Income"}
 _INCOME_PFC_PRIMARIES = {
@@ -35,6 +40,7 @@ _INCOME_PFC_PRIMARIES = {
     "INCOME_UNEMPLOYMENT",
     "INCOME_OTHER",
 }
+_INCOME_OVERRIDE_NAMES = {c.casefold() for c in _INCOME_LEGACY_CATEGORIES}
 
 UNCATEGORIZED = "Uncategorized"
 
@@ -78,10 +84,11 @@ def classify(
     legacy_top_label = plaid_category[0] if plaid_category else None
 
     if override_category is not None:
+        override_normalized = override_category.strip().casefold()
         return TransactionClassification(
             effective_category=override_category,
-            is_transfer=False,
-            is_income=override_category in _INCOME_LEGACY_CATEGORIES,
+            is_transfer=override_normalized in _TRANSFER_OVERRIDE_NAMES,
+            is_income=override_normalized in _INCOME_OVERRIDE_NAMES,
         )
 
     raw_label = _raw_label(personal_finance_category, plaid_category)

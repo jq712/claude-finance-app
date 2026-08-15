@@ -71,8 +71,14 @@ def compare_periods(
     category: str | None = None,
 ) -> PeriodComparison:
     """Spending in two periods, optionally scoped to one effective
-    category. `category` matching is case-sensitive and exact — it must
-    match a label `get_spending_by_category` would have produced."""
+    category. `category` matching is case-insensitive but otherwise
+    exact — it must match a label `get_spending_by_category` would have
+    produced. This does not reconcile the *same* real-world category
+    reported under two genuinely different labels (e.g. Plaid's legacy
+    taxonomy vs. `personal_finance_category` producing different strings
+    for what a human would call the same category) — see
+    docs/analytics.md's Known limitations."""
+    target = category.casefold() if category is not None else None
 
     def _amount(period: tuple[datetime.date, datetime.date]) -> Decimal:
         start, end = period
@@ -81,7 +87,7 @@ def compare_periods(
             (
                 t.amount
                 for t in txns
-                if t.is_spending and (category is None or t.effective_category == category)
+                if t.is_spending and (target is None or t.effective_category.casefold() == target)
             ),
             Decimal("0"),
         )
