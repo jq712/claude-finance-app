@@ -2,11 +2,16 @@
 
 Owner-facing operational procedures. Each runbook is written so the owner can follow it under stress, and so an agent can follow it without improvising.
 
+Written:
+
+| Runbook | Milestone |
+|---|---|
+| [`plaid-link.md`](plaid-link.md) — initial Link, token exchange, credential storage, update mode, rotation | 2 |
+
 Planned (created with the milestone that makes them real):
 
 | Runbook | Milestone |
 |---|---|
-| `plaid-link.md` — initial Link, token exchange, credential storage, update mode, rotation | 2 |
 | `deploy.md` — normal release and rollback | 7 |
 | `restore-backup.md` — restore into a clean instance and verify | 7 |
 | `failed-sync.md` — diagnosing a failed or stalled sync via `finops` | 7 |
