@@ -33,13 +33,19 @@ def test_finance_agent_cannot_mutate_plaid_transactions(role_engine, statement: 
 
 
 @pytest.mark.parametrize("table", ["items", "accounts", "sync_state"])
-def test_finance_agent_cannot_write_any_plaid_table(role_engine, table: str) -> None:
+@pytest.mark.parametrize("verb", ["DELETE FROM", "UPDATE", "INSERT INTO"])
+def test_finance_agent_cannot_write_any_plaid_table(role_engine, table: str, verb: str) -> None:
     engine = role_engine("finance_agent")
+    statement = {
+        "DELETE FROM": f"DELETE FROM plaid.{table}",
+        "UPDATE": f"UPDATE plaid.{table} SET id = id",
+        "INSERT INTO": f"INSERT INTO plaid.{table} DEFAULT VALUES",
+    }[verb]
     with (
         engine.connect() as conn,
         pytest.raises(ProgrammingError, match="permission denied"),
     ):
-        conn.exec_driver_sql(f"DELETE FROM plaid.{table}")
+        conn.exec_driver_sql(statement)
 
 
 def test_finance_agent_can_write_user_schema(role_engine) -> None:
