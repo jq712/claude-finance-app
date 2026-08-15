@@ -31,6 +31,27 @@ def get_sessionmaker() -> sessionmaker[Session]:
     return _sessionmaker
 
 
+def dispose_engine() -> None:
+    """Drop pooled connections and force the next `get_engine()`/
+    `get_sessionmaker()` call to reconnect from scratch.
+
+    Needed after anything that drops and recreates a database role out
+    from under an already-pooled connection — e.g. `alembic downgrade`
+    on the roles-and-grants migration. PostgreSQL ties an open session's
+    privileges to the role identity at connect time, so a connection
+    pooled before a `DROP ROLE` / `CREATE ROLE` round-trip silently loses
+    access to grants issued to the new role object, even though the role
+    name is unchanged (see
+    tests/integration/test_migration_reversibility.py, which calls this
+    after restoring migrations to head).
+    """
+    global _engine, _sessionmaker
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _sessionmaker = None
+
+
 @contextmanager
 def session_scope() -> Iterator[Session]:
     """A transactional session: commits on clean exit, rolls back on error."""

@@ -22,6 +22,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
+from finance_app.db.session import dispose_engine
+
 pytestmark = pytest.mark.integration
 
 ALEMBIC_DSN = "postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev"
@@ -50,6 +52,10 @@ def restore_to_head():
         f"failed to restore migrations to head after a reversibility test: "
         f"{result.stdout}\n{result.stderr}"
     )
+    # Any connection this process pooled via the shared app engine before
+    # the downgrade/upgrade round-trip is now stale relative to the
+    # recreated finance_app role — see dispose_engine()'s docstring.
+    dispose_engine()
 
 
 def test_downgrade_then_upgrade_round_trips_cleanly(restore_to_head, role_engine) -> None:
