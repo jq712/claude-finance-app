@@ -81,3 +81,21 @@ def test_exhausts_retries_and_raises() -> None:
         _sync_page_with_retry(client, access_token="tok", cursor=None)
 
     assert client.calls == 3
+
+
+def test_non_api_exception_bypasses_retry_entirely() -> None:
+    """`_sync_page_with_retry` only catches `plaid.ApiException`. A raw
+    transport-level failure that the SDK does not wrap as an `ApiException`
+    (a DNS failure, a connection reset, a read timeout surfaced as a bare
+    `ConnectionError`/`TimeoutError`) is therefore not retried at all -- it
+    propagates immediately as its original type on the very first attempt,
+    contrary to the module's stated intent of retrying transient failures.
+    It also isn't wrapped as `PlaidSyncError`, so a caller that only catches
+    `PlaidSyncError` (as `finance sync`'s CLI handler does) would not catch
+    this and would crash with an unhandled exception instead."""
+    client = _FlakyClient([ConnectionError("connection reset by peer")], object())
+
+    with pytest.raises(ConnectionError):
+        _sync_page_with_retry(client, access_token="tok", cursor=None)
+
+    assert client.calls == 1, "no retry attempted for a non-ApiException failure"

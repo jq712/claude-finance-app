@@ -9,6 +9,7 @@ answer both, plus the added/modified/removed/pagination lifecycle.
 
 import datetime
 import json
+import threading
 from dataclasses import dataclass, field
 from decimal import Decimal
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ import plaid
 import pytest
 from sqlalchemy import text
 
-from finance_app.db.session import get_sessionmaker
+from finance_app.db.session import get_sessionmaker, session_scope
 from finance_app.plaid.sync import PlaidSyncError, SyncClient, run_sync
 
 pytestmark = pytest.mark.integration
@@ -358,3 +359,365 @@ def test_bootstrap_item_get_failure_is_sanitized_before_it_can_leak() -> None:
     assert "definitely-not-a-real-secret-value" not in message
     assert "should-never-appear-in-a-sanitized-message" not in message
     assert _counts() == {"plaid.items": 0, "plaid.accounts": 0, "plaid.transactions": 0}
+
+
+# ---------------------------------------------------------------------------
+# Adversarial QA pass — concurrency, pagination edge cases, pending/posted
+# transitions, and finalization-boundary crashes. See the review report for
+# severity ranking; each test below stands on its own as a reproduction.
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_sync_invocations_can_regress_the_durable_cursor() -> None:
+    """Nothing — no row lock, no `SELECT ... FOR UPDATE`, no advisory lock —
+    stops two `run_sync` invocations from being in flight at once (e.g. a
+    systemd timer firing while a manual `finance sync` is still running).
+    Each reads `plaid.sync_state.cursor` at the top of its own page loop and
+    later writes its *own* `next_cursor` back unconditionally. This forces
+    a deterministic interleaving — run B reads the pre-run cursor, then
+    blocks on the Plaid call until run A has completed two pages end to
+    end — and shows B's stale, less-advanced cursor unconditionally
+    overwrites A's fully-committed progress. Both runs individually report
+    `status == "success"`; only the shared `plaid.sync_state` row ends up
+    wrong."""
+    b_reached_network = threading.Event()
+    b_may_finish = threading.Event()
+
+    class BlockingFirstPageClient(FakeSyncClient):
+        def transactions_sync(self, transactions_sync_request):
+            self.cursors_requested.append(getattr(transactions_sync_request, "cursor", None))
+            b_reached_network.set()
+            assert b_may_finish.wait(timeout=5), "test deadlocked waiting to be released"
+            page = self._pages.pop(0)
+            if isinstance(page, Exception):
+                raise page
+            return page
+
+    a_client = FakeSyncClient(
+        [
+            _Page(
+                accounts=[_fake_account()],
+                added=[_fake_txn("txn-a1")],
+                next_cursor="cA1",
+                has_more=True,
+            ),
+            _Page(
+                accounts=[_fake_account()],
+                added=[_fake_txn("txn-a2")],
+                next_cursor="cA2",
+                has_more=False,
+            ),
+        ]
+    )
+    b_client = BlockingFirstPageClient(
+        [
+            _Page(
+                accounts=[_fake_account()],
+                added=[_fake_txn("txn-b1")],
+                next_cursor="cB1-stale",
+                has_more=False,
+            )
+        ]
+    )
+
+    results: dict[str, object] = {}
+
+    def _run_b() -> None:
+        results["b"] = run_sync(b_client, access_token="tok", run_type="scheduled")
+
+    b_thread = threading.Thread(target=_run_b)
+    b_thread.start()
+    assert b_reached_network.wait(timeout=5), "run B never reached its network call"
+
+    results["a"] = run_sync(a_client, access_token="tok", run_type="manual")
+
+    b_may_finish.set()
+    b_thread.join(timeout=5)
+    assert not b_thread.is_alive(), "run B did not finish"
+
+    assert results["a"].status == "success"
+    assert results["b"].status == "success"
+
+    Session = get_sessionmaker()
+    with Session() as session:
+        cursor = session.execute(text("SELECT cursor FROM plaid.sync_state")).scalar_one()
+
+    # A fully processed two pages (txn-a1, txn-a2) and durably advanced the
+    # cursor to "cA2" before B's blocked write ever landed. B's write is
+    # unconditional, so it stomps the cursor back to its own page's
+    # next_cursor -- a value that does *not* reflect A's committed work.
+    # The next real sync will resume from "cB1-stale" instead of "cA2",
+    # re-requesting data Plaid has already delivered and durably committed.
+    assert cursor == "cB1-stale", (
+        "expected B's unconditional write to regress the cursor behind A's "
+        "already-committed progress; got a cursor that suggests the race "
+        "did not land as constructed -- re-check the event ordering"
+    )
+    assert _counts()["plaid.transactions"] == 3, "both runs' rows are present (upserts are safe)"
+
+
+def test_a_later_page_with_no_accounts_list_still_resolves_a_previously_seen_account() -> None:
+    """Plaid does not resend the full `accounts` array on every page of a
+    single sync run -- only entries relevant to that page. A page whose
+    `accounts` list is empty, but whose `modified` list references an
+    account introduced by an *earlier* page in the same run, must resolve
+    that account from what's already committed rather than raising
+    `PlaidSyncError` as if the account were genuinely unknown."""
+    client = FakeSyncClient(
+        [
+            _Page(
+                accounts=[_fake_account()],
+                added=[_fake_txn("txn-1")],
+                next_cursor="c1",
+                has_more=True,
+            ),
+            _Page(
+                accounts=[],
+                modified=[_fake_txn("txn-1", amount=Decimal("15.00"))],
+                next_cursor="c2",
+                has_more=False,
+            ),
+        ]
+    )
+
+    summary = run_sync(client, access_token="tok")
+
+    assert summary.status == "success"
+    assert summary.modified_count == 1
+    assert _counts()["plaid.transactions"] == 1
+
+
+def test_pending_to_posted_transition_with_a_different_id_in_the_same_page() -> None:
+    """Plaid can represent a pending -> posted transition as a brand new
+    transaction id: the old pending id shows up in `removed`, the new
+    posted id shows up in `added`, in the same page. Losing either half —
+    failing to tombstone the old id, or failing to insert the new one —
+    would silently lose or duplicate the transaction."""
+    run_sync(
+        FakeSyncClient(
+            [
+                _Page(
+                    accounts=[_fake_account()],
+                    added=[_fake_txn("txn-pending", pending=True)],
+                    next_cursor="c1",
+                )
+            ]
+        ),
+        access_token="tok",
+    )
+
+    run_sync(
+        FakeSyncClient(
+            [
+                _Page(
+                    accounts=[_fake_account()],
+                    added=[_fake_txn("txn-posted", pending=False)],
+                    removed=[_fake_removed("txn-pending")],
+                    next_cursor="c2",
+                )
+            ]
+        ),
+        access_token="tok",
+    )
+
+    Session = get_sessionmaker()
+    with Session() as session:
+        pending_removed_at = session.execute(
+            text(
+                "SELECT removed_at FROM plaid.transactions "
+                "WHERE plaid_transaction_id = 'txn-pending'"
+            )
+        ).scalar_one()
+        posted_removed_at = session.execute(
+            text(
+                "SELECT removed_at FROM plaid.transactions "
+                "WHERE plaid_transaction_id = 'txn-posted'"
+            )
+        ).scalar_one_or_none()
+
+    assert pending_removed_at is not None, "the old pending id must be tombstoned"
+    assert posted_removed_at is None, "the new posted id must be live, not itself tombstoned"
+    assert _counts()["plaid.transactions"] == 2, "both rows retained -- provenance, not deletion"
+
+
+def test_removed_for_a_never_seen_transaction_id_is_a_silent_no_op_end_to_end() -> None:
+    """docs/plaid-sync.md documents a known limitation: a `removed` event
+    for a transaction id this database has never seen is a silent no-op,
+    not remembered as a tombstone. Confirmed here through the real
+    `run_sync` entry point (not just the repository layer): the run
+    succeeds, nothing is inserted, and — because no tombstone is
+    remembered — a later `added` for that same id inserts it live rather
+    than being suppressed."""
+    summary = run_sync(
+        FakeSyncClient(
+            [
+                _Page(
+                    accounts=[_fake_account()],
+                    removed=[_fake_removed("ghost-txn")],
+                    next_cursor="c1",
+                )
+            ]
+        ),
+        access_token="tok",
+    )
+
+    assert summary.status == "success"
+    assert summary.removed_count == 1
+    assert _counts()["plaid.transactions"] == 0
+
+    run_sync(
+        FakeSyncClient(
+            [_Page(accounts=[_fake_account()], added=[_fake_txn("ghost-txn")], next_cursor="c2")]
+        ),
+        access_token="tok",
+    )
+
+    Session = get_sessionmaker()
+    with Session() as session:
+        removed_at = session.execute(
+            text(
+                "SELECT removed_at FROM plaid.transactions WHERE plaid_transaction_id = 'ghost-txn'"
+            )
+        ).scalar_one()
+    assert removed_at is None, "no phantom tombstone -- the late add inserts live"
+
+
+def test_retries_exhausted_mid_run_records_failure_without_leaking_the_access_token() -> None:
+    """When retries are exhausted on page 2 (after page 1 already
+    committed), the failure path must (a) leave the cursor at page 1's
+    committed value, (b) mark both `plaid.sync_state` and `ops.sync_runs`
+    as failed, and (c) never persist the access token or any raw header
+    from the underlying `ApiException` into the stored error message."""
+
+    def _rate_limit_exc() -> plaid.ApiException:
+        exc = plaid.ApiException(status=429, reason="Too Many Requests")
+        exc.body = json.dumps(
+            {
+                "error_type": "RATE_LIMIT_EXCEEDED",
+                "error_code": "RATE_LIMIT_EXCEEDED",
+                "error_message": "rate limited for access_token=super-secret-access-token-xyz",
+            }
+        )
+        exc.headers = {"Authorization": "Bearer super-secret-access-token-xyz"}
+        return exc
+
+    good_page = _Page(
+        accounts=[_fake_account()],
+        added=[_fake_txn("txn-1")],
+        next_cursor="c1",
+        has_more=True,
+    )
+    client = FakeSyncClient([good_page, _rate_limit_exc(), _rate_limit_exc(), _rate_limit_exc()])
+
+    with pytest.raises(PlaidSyncError):
+        run_sync(client, access_token="super-secret-access-token-xyz")
+
+    Session = get_sessionmaker()
+    with Session() as session:
+        state_row = session.execute(
+            text("SELECT cursor, status, last_error FROM plaid.sync_state")
+        ).one()
+        run_row = session.execute(text("SELECT status, last_error FROM ops.sync_runs")).one()
+
+    assert state_row.cursor == "c1", "cursor stays at the last durably committed page"
+    assert state_row.status == "error"
+    assert run_row.status == "error"
+    for message in (state_row.last_error, run_row.last_error):
+        assert message is not None
+        assert "super-secret-access-token-xyz" not in message
+        assert "Bearer" not in message
+
+
+def test_kill_between_last_page_commit_and_finalization_leaves_status_stuck() -> None:
+    """The last page's row-writes + cursor advance commit in one
+    transaction; `record_success`/`finish_success` commit in *separate*
+    transactions afterward (see plaid/sync.py). A process killed in the
+    gap between them leaves `plaid.sync_state.status` and
+    `ops.sync_runs.status` stuck at `'running'` forever, even though the
+    data and the cursor are already correct and durable. This directly
+    replicates that gap by driving the same repository calls run_sync
+    uses and stopping short of finalization -- simulating the kill -- then
+    proves two things: (1) no data was lost, and (2) the stuck `'running'`
+    status is not a lock -- nothing in the loop checks it, so the very
+    next real sync proceeds normally and does not duplicate the row."""
+    from finance_app.db.repositories import accounts as accounts_repo
+    from finance_app.db.repositories import items as items_repo
+    from finance_app.db.repositories import sync_runs as sync_runs_repo
+    from finance_app.db.repositories import sync_state as sync_state_repo
+    from finance_app.db.repositories import transactions as transactions_repo
+    from finance_app.db.repositories.transactions import TransactionFields
+
+    with session_scope() as session:
+        item = items_repo.upsert_item(
+            session, plaid_item_id="killed-item", institution_id="ins", institution_name="Bank"
+        )
+        item_id = item.id
+
+    with session_scope() as session:
+        sync_runs_repo.start(session, item_id=item_id, run_type="manual")
+
+    with session_scope() as session:
+        state = sync_state_repo.get_or_create(session, item_id=item_id)
+        sync_state_repo.record_attempt(session, state)
+
+    with session_scope() as session:
+        state = sync_state_repo.get_or_create(session, item_id=item_id)
+        account = accounts_repo.upsert_account(
+            session,
+            item_id=item_id,
+            plaid_account_id="acc-killed",
+            name="Killed Checking",
+            official_name=None,
+            type="depository",
+            subtype="checking",
+            mask="0000",
+            iso_currency_code="USD",
+        )
+        transactions_repo.upsert(
+            session,
+            TransactionFields(
+                plaid_transaction_id="txn-killed",
+                account_id=account.id,
+                amount=Decimal("5.00"),
+                date=datetime.date(2026, 1, 1),
+                name="SURVIVES A KILL",
+            ),
+        )
+        sync_state_repo.advance(
+            session,
+            state,
+            cursor="final-cursor",
+            added_count=1,
+            modified_count=0,
+            removed_count=0,
+            request_id="req-1",
+        )
+    # --- simulated SIGKILL here: record_success / finish_success never run. ---
+
+    Session = get_sessionmaker()
+    with Session() as session:
+        state_row = session.execute(text("SELECT cursor, status FROM plaid.sync_state")).one()
+        run_row = session.execute(text("SELECT status FROM ops.sync_runs")).one()
+
+    assert state_row.cursor == "final-cursor", "the data-bearing commit landed"
+    assert state_row.status == "running", "finalization never ran -- status is stuck"
+    assert run_row.status == "running"
+    assert _counts()["plaid.transactions"] == 1
+
+    resumed_client = FakeSyncClient(
+        [
+            _Page(
+                accounts=[_fake_account(account_id="acc-killed")],
+                next_cursor="final-cursor-2",
+                has_more=False,
+            )
+        ]
+    )
+    summary = run_sync(resumed_client, access_token="tok")
+
+    assert summary.status == "success"
+    assert resumed_client.cursors_requested == ["final-cursor"], (
+        "resumed from the last durably committed cursor, unblocked by the "
+        "stuck 'running' status from the 'killed' run"
+    )
+    assert _counts()["plaid.transactions"] == 1, "no duplication of the row from the 'killed' run"
