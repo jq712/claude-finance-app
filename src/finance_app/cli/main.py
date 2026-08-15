@@ -4,6 +4,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from finance_app import __version__
 from finance_app.analytics.budgeting import get_budget_status
@@ -74,7 +75,7 @@ def status() -> None:
             item_count = session.execute(select(func.count()).select_from(Item)).scalar_one()
             account_count = session.execute(select(func.count()).select_from(Account)).scalar_one()
             sync_state = session.execute(select(SyncState)).scalars().first()
-    except Exception as exc:  # database unreachable, wrong creds, etc.
+    except SQLAlchemyError as exc:  # database unreachable, wrong creds, etc.
         console.print(f"[yellow]database unavailable:[/yellow] {exc}")
         return
 
@@ -192,8 +193,8 @@ def budget(month: str | None = _MONTH_OPTION) -> None:
 
 @transactions_app.command("recent")
 def transactions_recent(
-    days: int = typer.Option(30, help="Look back this many days."),
-    limit: int = typer.Option(20, help="Maximum rows to show."),
+    days: int = typer.Option(30, min=0, help="Look back this many days."),
+    limit: int = typer.Option(20, min=1, help="Maximum rows to show."),
 ) -> None:
     """The most recent transactions, newest first."""
     with session_scope() as session:
@@ -204,12 +205,13 @@ def transactions_recent(
 @transactions_app.command("search")
 def transactions_search(
     query: str = typer.Argument(..., help="Case-insensitive substring to match name/merchant."),
-    days: int = typer.Option(365, help="Look back this many days."),
-    limit: int = typer.Option(20, help="Maximum rows to show."),
+    days: int = typer.Option(365, min=0, help="Look back this many days."),
+    limit: int = typer.Option(20, min=1, help="Maximum rows to show."),
 ) -> None:
     """Search transactions by name/merchant substring."""
-    end = datetime.date.today() + datetime.timedelta(days=1)
-    start = end - datetime.timedelta(days=days)
+    today = datetime.date.today()
+    start = today - datetime.timedelta(days=days)
+    end = today + datetime.timedelta(days=1)  # half-open; --days 0 still includes today
     with session_scope() as session:
         records = search_transactions(session, query=query, start=start, end=end, limit=limit)
     _print_transactions(records)

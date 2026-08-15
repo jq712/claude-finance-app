@@ -4,6 +4,8 @@ golden dataset as tests/integration/test_analytics.py and asserts the
 CLI's rendered output agrees with the analytics layer it wraps."""
 
 import datetime
+import re
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
@@ -18,6 +20,15 @@ pytestmark = pytest.mark.integration
 
 MONTH_START = datetime.date(2026, 1, 1)
 runner = CliRunner()
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text_with_ansi: str) -> str:
+    """Rich highlights numbers/etc. with ANSI codes even in a non-TTY
+    CliRunner capture; strip them so exact-value assertions aren't broken
+    by styling that has nothing to do with correctness."""
+    return _ANSI_ESCAPE.sub("", text_with_ansi)
 
 
 @pytest.fixture
@@ -73,7 +84,11 @@ def test_spending_command_shows_categories_and_total(seeded_session) -> None:
     assert result.exit_code == 0
     assert "Rent" in result.stdout
     assert "1500.00" in result.stdout
-    assert "Total:" in result.stdout
+    # Exact total, not just that a "Total:" line exists — 1500 rent + 100
+    # cash advance + 87.32 groceries + 27.10 restaurants (netted refund) +
+    # 15.99 subscription + 6.25 pending coffee, matching
+    # tests/integration/test_analytics.py's by-category golden values.
+    assert "Total: 1736.66" in _plain(result.stdout)
 
 
 def test_spending_command_filters_by_category(seeded_session) -> None:
@@ -86,7 +101,7 @@ def test_spending_command_filters_by_category(seeded_session) -> None:
 def test_income_command_reports_paycheck_total(seeded_session) -> None:
     result = runner.invoke(app, ["income", "--month", "2026-01"])
     assert result.exit_code == 0
-    assert "3200.00" in result.stdout
+    assert "Income 2026-01-01 to 2026-02-01: 3200.00" in result.stdout
 
 
 def test_cashflow_command_reports_income_spending_and_net(seeded_session) -> None:
@@ -119,6 +134,32 @@ def test_transactions_search_reports_no_matches(seeded_session) -> None:
     result = runner.invoke(app, ["transactions", "search", "nonexistent-xyz", "--days", "3650"])
     assert result.exit_code == 0
     assert "No transactions found." in result.stdout
+
+
+def test_transactions_search_days_zero_still_includes_a_transaction_dated_today(
+    seeded_session,
+) -> None:
+    """Regression test: `search`'s date window used to be computed
+    independently of `recent`'s and was off by one, so `--days 0` silently
+    excluded today's own transactions. Both commands must agree that
+    `--days 0` means "just today"."""
+    session, account_id = seeded_session
+    upsert(
+        session,
+        TransactionFields(
+            plaid_transaction_id="cli-test-today-txn",
+            account_id=account_id,
+            amount=Decimal("4.50"),
+            date=datetime.date.today(),
+            name="TODAY ONLY COFFEE SHOP",
+        ),
+    )
+    session.commit()
+
+    result = runner.invoke(app, ["transactions", "search", "today only", "--days", "0"])
+
+    assert result.exit_code == 0
+    assert "Today Only Coffee Shop".upper() in result.stdout.upper()
 
 
 def test_status_command_reports_seeded_item_and_account(seeded_session) -> None:
