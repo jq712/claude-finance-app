@@ -2,7 +2,7 @@
 
 A single-user, headless financial intelligence application. One Plaid Item → PostgreSQL → deterministic analytics → a CLI plus a conversational financial agent, running on one Linux VPS.
 
-**Status:** Milestone 2 complete. Plaid `/transactions/sync` ingestion — client abstraction, durable cursor, added/modified/removed handling, retry, sync-run audit trail, and the `finance sync` CLI command — is in place; deterministic analytics (Milestone 3+) does not exist yet. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, and [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design.
+**Status:** Milestone 3 complete. Deterministic analytics — spending, income, cash flow, period comparisons, category overrides, recurring-charge detection, and budget variance, all over the `plaid.*` data Milestone 2 keeps in sync — is in place and requires no LLM. The CLI (Milestone 4) does not expose it yet. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design, and [`docs/analytics.md`](docs/analytics.md) for the analytics design.
 
 ## The core idea
 
@@ -64,7 +64,7 @@ uv run ruff format . && uv run ruff check .
 uv run pyright
 ```
 
-The next task is Milestone 3: deterministic analytics (spending, income, cash flow, category/budget calculations) over the `plaid.*` data Milestone 2 now keeps in sync. Start a Claude Code session in this directory and:
+The next task is Milestone 4: the deterministic CLI (`finance spending`, `finance income`, `finance cashflow`, `finance budget`, ...) that exposes the Milestone 3 analytics layer, useful even with the runtime LLM unavailable. Start a Claude Code session in this directory and:
 
 ```text
 Continue executing CLAUDE_FINANCE_APP_HANDOFF.md from the first incomplete milestone.
