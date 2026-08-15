@@ -2,7 +2,7 @@
 
 A single-user, headless financial intelligence application. One Plaid Item → PostgreSQL → deterministic analytics → a CLI plus a conversational financial agent, running on one Linux VPS.
 
-**Status:** Milestone 0 complete. Engineering rails, Python project scaffold, dev Postgres, and CI are in place; the database schema and Plaid ingestion (Milestone 1+) do not exist yet. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan.
+**Status:** Milestone 1 complete. Database schema, SQLAlchemy models, Alembic migrations, and the least-privilege role/grant model are in place and independently reviewed; Plaid ingestion (Milestone 2+) does not exist yet. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan and [`docs/database.md`](docs/database.md) for the schema.
 
 ## The core idea
 
@@ -58,12 +58,13 @@ deploy/                   (Milestone 7) Compose, systemd, Caddy
 ```bash
 uv sync
 docker compose -f deploy/compose.dev.yaml up -d
+uv run alembic upgrade head
 uv run pytest
 uv run ruff format . && uv run ruff check .
 uv run pyright
 ```
 
-The next task is Milestone 1: database schemas, SQLAlchemy models, Alembic migrations, and the role/grant model. Start a Claude Code session in this directory and:
+The next task is Milestone 2: Plaid client abstraction, Sandbox configuration, `/transactions/sync` with a durable cursor, and sync-run audit state. Start a Claude Code session in this directory and:
 
 ```text
 Continue executing CLAUDE_FINANCE_APP_HANDOFF.md from the first incomplete milestone.
