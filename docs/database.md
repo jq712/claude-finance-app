@@ -1,0 +1,60 @@
+# Database
+
+Milestone 1 deliverable. PostgreSQL, SQLAlchemy 2.x models, Alembic migrations. See `docs/architecture.md` for how this fits the rest of the system and `docs/security-model.md` for the invariants this schema enforces.
+
+## Schemas
+
+| Schema | Owns | Written by |
+|---|---|---|
+| `plaid` | `items`, `accounts`, `transactions`, `sync_state` — raw source-of-truth facts | `finance_app` only (deterministic ingestion) |
+| `user` | `transaction_category_overrides`, `transaction_tags`, `transaction_notes`, `preferences` — interpretation | `finance_app`, `finance_agent` |
+| `finance` | `budgets` — modeled user constructs | `finance_app`, `finance_agent` |
+| `agent` | `conversations`, `messages`, `analysis_runs`, `tool_calls`, `category_suggestions` — audit trail | `finance_app`, `finance_agent` |
+| `ops` | `job_runs`, `sync_runs`, `errors` — sanitized operational state | `finance_app` only |
+
+`plaid.transactions` is never hard-deleted. A Plaid `removed` event sets `removed_at` instead — provenance is never destroyed (handoff §4.1). `finance.budgets` is deliberately not split into a separate `budget_categories` table: one budget is one category's monthly amount, matching how the CLI and the agent's `create_budget`/`update_budget` tools present it (handoff §7 — do not over-normalize without a demonstrated need).
+
+## Roles
+
+Created by `migrations/versions/0002_..._roles_and_grants.py`. `finance_migrator` is not created there — it is the container/cluster bootstrap role (`deploy/compose.dev.yaml`'s `POSTGRES_USER` in dev; a real Postgres role with `CREATEROLE`/DDL rights in production) and is what migrations connect as.
+
+| Role | Grants | Used by |
+|---|---|---|
+| `finance_owner` | `ALL` on every schema | nothing in the normal application path |
+| `finance_migrator` | DDL; creates the other five roles | `alembic upgrade` only |
+| `finance_app` | `SELECT/INSERT/UPDATE/DELETE` on all five schemas | the deterministic application (ingestion, CLI, budgeting) |
+| `finance_agent` | `SELECT` only on `plaid.*`; full DML on `user.*`/`finance.*`/`agent.*`; no grant on `ops.*` | the runtime conversational agent's tool layer |
+| `finance_observer` | `SELECT` only on `ops.*` | `finops` health/status commands |
+| `finance_backup` | `SELECT` only, every schema | `pg_dump` |
+
+`ALTER DEFAULT PRIVILEGES FOR ROLE finance_migrator` is set for every schema/role pair, so tables added by future migrations inherit the right grants automatically — a new migration doesn't need to touch `0002` or duplicate its grants.
+
+Passwords resolve from `<ROLE>_DB_PASSWORD` environment variables, falling back to the `devpassword` literal already used for the dev/test container. That default is synthetic and disposable, never a production credential — production role passwords are provisioned out of band as systemd encrypted credentials (`docs/security-model.md` invariant 4) and are never read from this repository.
+
+## Connections
+
+- `DATABASE_URL` — the application's own connection, as `finance_app`. `src/finance_app/db/session.py` reads this.
+- `ALEMBIC_DATABASE_URL` — migrations only, as `finance_migrator`. `migrations/env.py` reads this, deliberately not `DATABASE_URL`, because `finance_app` has no DDL rights and migrations must not silently fall back to a role that happens to have more privilege than it needs.
+- The runtime agent's tool layer (Milestone 5) and `finops` (Milestone 7+) will each open their own connection as `finance_agent` / `finance_observer` respectively — they do not share `db/session.py`'s engine, which is `finance_app`-scoped by design.
+
+## Verifying the boundary
+
+```bash
+docker compose -f deploy/compose.dev.yaml up -d
+uv run alembic upgrade head
+uv run pytest tests/integration -v -m integration   # migrations + repositories
+uv run pytest tests/security -v -m integration       # finance_agent cannot mutate plaid.*
+```
+
+`tests/security/test_role_grants.py` is the test the Milestone 1 exit criteria refers to: it connects as each role directly (not through the application) and asserts the grant boundary, not application-level convention. A Postgres `permission denied` error, not an application-level check, is what stops `finance_agent` from writing `plaid.*`.
+
+## Synthetic fixtures
+
+`tests/plaid_fixtures/synthetic.py` provides Plaid-shaped test data — no real financial data ever. `golden_month()` returns one representative month covering paycheck income, rent, groceries, a restaurant charge and its refund, an internal transfer, ATM cash, a subscription, and a pending transaction, matching the categories handoff §24 requires the eventual agent-eval golden dataset to cover.
+
+## What Milestone 1 deliberately does not do yet
+
+- No Plaid client or sync loop (Milestone 2) — `db/repositories/transactions.py` has `upsert`/`mark_removed` ready for it to call.
+- No analytics layer (Milestone 3) reading these tables yet.
+- No CLI commands (Milestone 4) wired to the repository yet.
+- The runtime agent's own `finance_agent`-scoped connection and semantic tools (Milestone 5) don't exist yet; this milestone only proves the database-level boundary they will run inside.

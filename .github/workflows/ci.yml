@@ -43,25 +43,58 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_USER: finance_app
+          # The container bootstrap superuser is finance_migrator, not the
+          # least-privilege finance_app runtime role — see docs/database.md.
+          POSTGRES_USER: finance_migrator
           POSTGRES_PASSWORD: devpassword
           POSTGRES_DB: finance_dev
         ports:
           - 5433:5432
         options: >-
-          --health-cmd "pg_isready -U finance_app -d finance_dev"
+          --health-cmd "pg_isready -U finance_migrator -d finance_dev"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
       DATABASE_URL: postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
       - run: uv sync --locked
+      - run: uv run alembic upgrade head
       - run: uv run pytest tests/integration -v -m integration
+
+  security-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: finance_migrator
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: finance_dev
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U finance_migrator -d finance_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run alembic upgrade head
+      - name: role-boundary tests (finance_agent must never mutate plaid.*)
+        run: uv run pytest tests/security -v -m integration
 
   secret-scan:
     runs-on: ubuntu-latest

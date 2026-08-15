@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     finance_env: str = "development"
 
     database_url: str = "postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev"
+    # Migrations run DDL and create roles, so they use the bootstrap/owner
+    # role rather than the least-privilege `finance_app` runtime role.
+    alembic_database_url: str = (
+        "postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev"
+    )
 
     plaid_env: str = "sandbox"
     plaid_client_id: str = ""
