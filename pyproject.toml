@@ -46,6 +46,11 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
 
+[tool.ruff.lint.per-file-ignores]
+# Alembic autogenerate produces long op.create_table(...) calls; reformatting
+# them by hand would hurt readability without adding information.
+"migrations/versions/*.py" = ["E501"]
+
 [tool.pyright]
 include = ["src", "tests"]
 venvPath = "."

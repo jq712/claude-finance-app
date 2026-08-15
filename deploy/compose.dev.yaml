@@ -1,12 +1,18 @@
 # Isolated development/test PostgreSQL. Synthetic credentials only — never
 # point this at a production database. Used by local `finance` commands,
 # pytest integration tests, and CI.
+#
+# The container's bootstrap superuser is `finance_migrator` — the role
+# migrations run as. It creates the least-privilege runtime roles
+# (finance_app, finance_agent, finance_observer, finance_backup) as part of
+# migrations/versions/0002_roles_and_grants.py. The application itself
+# never connects as finance_migrator; see docs/database.md.
 services:
   postgres:
     image: postgres:17-alpine
     container_name: finance-app-postgres-dev
     environment:
-      POSTGRES_USER: finance_app
+      POSTGRES_USER: finance_migrator
       POSTGRES_PASSWORD: devpassword
       POSTGRES_DB: finance_dev
     ports:
@@ -14,7 +20,7 @@ services:
     volumes:
       - finance-app-postgres-dev-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U finance_app -d finance_dev"]
+      test: ["CMD-SHELL", "pg_isready -U finance_migrator -d finance_dev"]
       interval: 5s
       timeout: 5s
       retries: 10
