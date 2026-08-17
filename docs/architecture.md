@@ -27,7 +27,8 @@ A modular monolith. One Python application, one PostgreSQL database, one Linux V
 |  | finops CLI         |        | ops.*     operational      |  |
 |  +---------+----------+        +----------------------------+  |
 |            |                                                   |
-|            +---------------------> OpenAI API                  |
+|            +---------------------> OpenAI API or Claude API    |
+|            |                       (AGENT_PROVIDER, ADR-014)   |
 |            +---------------------> Plaid API                   |
 |                                                                |
 |  systemd timers: daily sync, backup, health/reconciliation     |
@@ -45,12 +46,12 @@ The user reaches the CLI over SSH. Nothing else is publicly reachable except, op
 | `plaid/` | Plaid client, `/transactions/sync` cursor loop, webhook handling, reconciliation | Contain analytics or presentation logic |
 | `db/` | Models, repositories, queries, views, session management | Be called directly by the agent's tool layer |
 | `analytics/` | Spending, income, cashflow, recurring detection, budgeting — all deterministic | Call an LLM, ever |
-| `agent/` | Tool definitions, instructions, guardrails, OpenAI service | Compute financial figures itself, or reach `db/` outside a semantic tool |
+| `agent/` | Tool definitions, instructions, guardrails, provider-interchangeable `AgentProvider` adapters (ADR-014) | Compute financial figures itself, or reach `db/` outside a semantic tool |
 | `cli/` | `finance` commands and the chat loop | Contain business logic that the agent also needs — that belongs in `analytics/` |
 | `ops/` | Health, status, structured logging, `finops` | Expose financial payloads |
 | `config/` | Settings, credential loading, environment validation | Read production secrets in a non-production environment |
 
-The seam that matters most: **`analytics/` is the only place financial figures are computed, and `agent/` reaches data only through the semantic tools.** Both the CLI and the agent sit on top of the same deterministic layer, which is why the application stays useful when OpenAI is unavailable.
+The seam that matters most: **`analytics/` is the only place financial figures are computed, and `agent/` reaches data only through the semantic tools.** Both the CLI and the agent sit on top of the same deterministic layer, which is why the application stays useful when the runtime LLM (whichever provider is configured) is unavailable.
 
 ## Data flow: ingestion
 

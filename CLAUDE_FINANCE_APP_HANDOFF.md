@@ -19,7 +19,7 @@ Build a production-grade, headless, single-user financial intelligence applicati
 7. Exposes both:
    - deterministic CLI commands; and
    - an interactive conversational financial agent.
-8. Uses OpenAI models for interpretation, tool selection, categorization, budgeting assistance, and explanations.
+8. Uses an LLM (OpenAI or the Claude API, provider-interchangeable per ADR-014) for interpretation, tool selection, categorization, budgeting assistance, and explanations.
 9. Allows the financial agent to write user-controlled/agent-owned metadata such as budgets, categories, tags, notes, and preferences.
 10. Prevents the financial agent from directly modifying raw Plaid source-of-truth records.
 11. Runs on a Linux VPS and is primarily accessed by the single user over SSH.
@@ -30,7 +30,7 @@ Build a production-grade, headless, single-user financial intelligence applicati
 
 The desired outcome is **high software-engineering autonomy with a deliberately small production-data blast radius**.
 
-> **Note on the two model providers.** The *engineering* agent is Claude Code (Anthropic). The *runtime* financial agent inside the shipped application uses OpenAI models, per the settled decision in Section 2. These are intentionally separate concerns; do not conflate them. If the owner later wants the runtime agent on the Claude API instead, that is a single-provider swap behind the agent service boundary in `src/finance_app/agent/` — design that layer so the swap stays cheap, but do not make it unprompted.
+> **Note on the two model providers.** The *engineering* agent is Claude Code (Anthropic). The *runtime* financial agent inside the shipped application is **provider-interchangeable**: it runs on OpenAI or the Claude API, selected by the `AGENT_PROVIDER` setting, per ADR-014 (which supersedes the OpenAI-only portion of ADR-013 — see Section 2). These remain intentionally separate concerns regardless of which provider the runtime agent is configured to use; do not conflate Claude Code with a Claude-API-powered runtime agent. See Section 8.4 for the provider-abstraction design.
 
 ---
 
@@ -40,7 +40,7 @@ These are settled unless a hard technical constraint makes one impossible:
 
 - Primary coding system: **Claude Code**.
 - Development autonomy: **maximum autonomy**.
-- Runtime LLM provider: **OpenAI**.
+- Runtime LLM provider: **provider-interchangeable** — OpenAI or the Claude API, selected via config (`AGENT_PROVIDER`), OpenAI as the default (ADR-014; supersedes the OpenAI-only wording formerly here).
 - Application language: **Python**.
 - Database: **PostgreSQL**.
 - Interface: **both CLI commands and conversational CLI chat**.
@@ -173,7 +173,7 @@ Production secret material includes at minimum:
 - Plaid client identifier as applicable;
 - Plaid production secret;
 - Plaid access token;
-- OpenAI runtime API key;
+- runtime agent provider API key(s) — `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`, whichever `AGENT_PROVIDER` is active (ADR-014);
 - PostgreSQL application credentials;
 - webhook/authentication secrets;
 - backup-encryption credentials.
@@ -218,7 +218,7 @@ Never log by default:
 - Plaid access tokens;
 - authorization headers;
 - database passwords;
-- OpenAI API keys;
+- runtime agent provider API keys (OpenAI or Anthropic);
 - account/routing numbers;
 - full financial payloads;
 - full prompts containing unnecessary transaction detail.
@@ -271,7 +271,8 @@ Use a modular monolith.
 |  | health commands    |        +----------------------------+  |
 |  +---------+----------+                                        |
 |            |                                                   |
-|            +--------------------> OpenAI API                   |
+|            +--------------------> OpenAI API or Claude API     |
+|                                    (AGENT_PROVIDER, ADR-014)    |
 |            |                                                   |
 |            +--------------------> Plaid API                    |
 |                                                                |
@@ -547,6 +548,28 @@ known transfer-account handling preferences
 
 Do not require giant historical conversations to restore personalization.
 
+### 8.4 Provider abstraction (ADR-014)
+
+The runtime agent is provider-interchangeable — OpenAI or the Claude API, chosen by config, not by code branch. This section is the design Milestone 5 implements it against.
+
+**Layering, top to bottom:**
+
+```text
+CLI ("finance chat") / conversation state
+    -> agent loop (provider-agnostic; owns the tool-execution cycle,
+       agent.tool_calls audit writes, write-tool permission checks)
+    -> AgentProvider protocol: run_turn(messages, tools) -> ToolCallRequest | FinalMessage
+    -> concrete adapter: OpenAIProvider | AnthropicProvider
+    -> the provider's own SDK / wire format
+```
+
+- **One tool definition, many wire formats.** Tools live in `src/finance_app/agent/tools/` as plain Python: name, description, a JSON Schema for inputs, and a handler function. Each adapter is responsible for translating that single definition into its provider's tool-calling shape at call time (OpenAI's `tools`/`function` shape; Anthropic's `tools`/`input_schema` shape). A tool is added once, in one place, and both providers pick it up — never hand-write the same tool twice.
+- **`AgentProvider` is the entire seam.** It has exactly one job: given the conversation so far and the available tools, make one model call and return either "call this tool with this input" or "here is the final message to the user." Everything outside that call — looping until the model stops requesting tools, writing `agent.tool_calls` audit rows, enforcing that write tools only touch `user.*`/`finance.*`/`agent.*`, persisting conversation history — is written once, above the interface, and is identical regardless of which adapter is active.
+- **Config:** `agent_provider: Literal["openai", "anthropic"]` (default `"openai"`), plus `anthropic_api_key: SecretStr` and `anthropic_model: str` settings alongside the existing `openai_api_key`/`openai_model`. Only the active provider's credential needs to be set; validate that at startup with a clear error, not a runtime KeyError mid-conversation.
+- **System prompts are per-provider, not shared text.** §8.2's behavioral requirements (distinguish fact from interpretation, disclose gaps, treat categorization as heuristic, no unlicensed professional advice, minimize data sent to the model) are the fixed contract both prompts must satisfy; the prompt wording that reliably gets a given model to honor that contract is expected to differ per provider and is tuned/evaluated independently.
+- **Audit trail carries provider identity.** `agent.tool_calls` (see §7's schema) records which provider served each call, so switching providers mid-history stays legible in the audit log and Milestone 6 evals can run against, or compare across, whichever provider(s) are configured.
+- **Scope boundary:** this abstraction covers the *tool-calling loop* only. It does not extend to unrelated OpenAI-specific surfaces unless a real need appears (e.g. embeddings, moderation) — don't build an adapter for a capability neither current tool needs.
+
 ---
 
 ## 9. Deterministic CLI
@@ -801,7 +824,7 @@ Must actively test:
 - refunds;
 - transfers;
 - negative/positive sign handling;
-- OpenAI failure;
+- runtime agent provider failure, on whichever provider(s) are configured;
 - malformed tool calls;
 - unauthorized write attempts;
 - prompt injection attempts;
@@ -861,7 +884,7 @@ ARCHITECTURE
 - SQLAlchemy/Alembic or verified equivalents
 - Docker/Compose
 - modular monolith
-- OpenAI runtime agent
+- provider-interchangeable runtime agent (OpenAI or Claude API, ADR-014)
 - Plaid Transactions Sync
 - CLI-first interface
 
@@ -991,7 +1014,7 @@ Migrations: Alembic
 Validation/settings: Pydantic / pydantic-settings
 HTTP: httpx where appropriate
 Plaid: official Python SDK where appropriate
-OpenAI: official OpenAI SDK / current agent/tool-calling approach
+Runtime agent providers: official OpenAI SDK and official Anthropic SDK, each behind the `AgentProvider` interface (ADR-014)
 Testing: pytest
 Static/lint: Ruff
 Type checking: Pyright or equivalent
@@ -1002,7 +1025,7 @@ Scheduling: systemd timers
 
 Verify exact package versions and current supported APIs before pinning them.
 
-Avoid adding LangChain or another agent framework unless it solves a demonstrated requirement better than the official OpenAI tooling and simple application code.
+Avoid adding LangChain or another agent framework unless it solves a demonstrated requirement better than the official provider SDKs and simple application code.
 
 ---
 
@@ -1341,7 +1364,8 @@ ADR-009 Isolated development environment with Plaid Sandbox
 ADR-010 Production secrets excluded from the Claude Code engineering environment
 ADR-011 systemd timers for scheduled single-host jobs
 ADR-012 Daily sync remains reconciliation fallback even with webhooks
-ADR-013 Claude Code for engineering, OpenAI for the runtime financial agent
+ADR-013 Claude Code for engineering, OpenAI for the runtime financial agent (runtime-provider portion superseded by ADR-014)
+ADR-014 Provider-interchangeable runtime financial agent (OpenAI or Claude API)
 ```
 
 ---
@@ -1444,25 +1468,28 @@ Deliver deterministic CLI commands for:
 
 Exit criteria:
 
-- useful even with OpenAI disabled.
+- useful even with the runtime LLM (whichever provider is configured) disabled.
 
 ### Milestone 5 — Conversational financial agent
 
 Deliver:
 
-- OpenAI integration;
-- semantic tools;
+- provider-agnostic `AgentProvider` interface and the shared tool-execution loop above it (§8.4, ADR-014);
+- OpenAI adapter and Claude API adapter, both concrete implementations of that interface;
+- semantic tools, defined once, translated per provider by its adapter — never duplicated;
 - tool authorization boundaries;
 - conversational CLI;
 - controlled write tools;
-- audit trail;
-- prompt/data minimization.
+- audit trail, including which provider served each call;
+- prompt/data minimization, with per-provider system prompts satisfying the shared §8.2 contract;
+- `AGENT_PROVIDER` config switch plus both providers' credential settings.
 
 Exit criteria:
 
-- agent can answer financial questions using tools;
-- numeric answers trace to deterministic results;
-- malicious prompts cannot access raw SQL, shell, Plaid secrets, or raw-row mutation.
+- agent can answer financial questions using tools, on **either** configured provider;
+- numeric answers trace to deterministic results, regardless of provider;
+- malicious prompts cannot access raw SQL, shell, Plaid secrets, or raw-row mutation, on either provider;
+- switching `AGENT_PROVIDER` requires a config change only — no code change, no tool redefinition.
 
 ### Milestone 6 — Agent eval framework
 
@@ -1473,11 +1500,11 @@ Deliver:
 - tool-call assertions;
 - permission assertions;
 - critical financial result assertions;
-- regression harness.
+- regression harness, runnable against whichever `AgentProvider` adapter(s) are configured.
 
 Exit criteria:
 
-- prompt/tool/model changes can be evaluated automatically.
+- prompt/tool/model changes can be evaluated automatically, per provider — a prompt change tuned for one provider doesn't silently regress the other undetected.
 
 ### Milestone 7 — Production deployment
 
@@ -1637,7 +1664,7 @@ Before using exact syntax/API/configuration for:
 - Claude Code subagents;
 - Claude Code Skills;
 - MCP;
-- OpenAI SDK agent/tool APIs;
+- OpenAI SDK and Anthropic SDK agent/tool APIs;
 - Plaid APIs;
 - GitHub Actions/security features;
 - Python package versions;
@@ -1731,10 +1758,15 @@ These are starting points, not substitutes for checking current documentation at
 - MCP: https://docs.claude.com/en/docs/claude-code/mcp
 - Claude Agent SDK: https://docs.claude.com/en/api/agent-sdk/overview
 
-### OpenAI (runtime financial agent)
+### Runtime financial agent providers (ADR-014)
 
+OpenAI:
 - API reference: https://platform.openai.com/docs/api-reference
 - Function calling / tools: https://platform.openai.com/docs/guides/function-calling
+
+Anthropic (Claude API — for the runtime agent when `AGENT_PROVIDER=anthropic`; distinct from Claude Code, the engineering agent):
+- API reference: https://platform.claude.com/docs/en/api/overview
+- Tool use: https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview
 
 ### Plaid
 

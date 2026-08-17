@@ -6,7 +6,7 @@ runtime agent will call — the CLI is not a second implementation of spending/i
 logic, it is a thin presentation layer over `src/finance_app/analytics/*.py`.
 
 **Exit criteria this satisfies (handoff §29):** useful even with the runtime LLM unavailable —
-none of these commands touch OpenAI or any model.
+none of these commands touch the runtime agent provider (OpenAI or Anthropic) or any model.
 
 ## Commands
 

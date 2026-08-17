@@ -13,7 +13,8 @@ One person's complete checking-account transaction history, plus the credentials
 │  Claude Code + subagents, CI runners, dev containers          │
 │  Has: Plaid Sandbox creds, synthetic data, repo write access  │
 │  Never has: production Plaid token, production DB owner creds,│
-│             production OpenAI key, shell on the finance VPS   │
+│             production runtime-agent API key (OpenAI or       │
+│             Anthropic), shell on the finance VPS               │
 └───────────────────────────────────────────────────────────────┘
                               │  immutable image, by SHA
                               v
@@ -25,7 +26,8 @@ One person's complete checking-account transaction history, plus the credentials
                               │  semantic tools only
                               v
 ┌─ Runtime agent boundary ──────────────────────────────────────┐
-│  OpenAI-backed conversational agent.                          │
+│  Provider-interchangeable conversational agent — OpenAI or    │
+│  the Claude API, selected by AGENT_PROVIDER (ADR-014).        │
 │  Has: a fixed set of validated, parameterized tools.          │
 │  Never has: SQL, shell, filesystem, network, Plaid creds,     │
 │             or any write path to plaid.*                      │
@@ -50,7 +52,7 @@ Sums, averages, medians, percentage changes, budget variance, cashflow, savings 
 
 ### 4. Production credentials are isolated
 
-Protected material: Plaid client ID, Plaid production secret, Plaid access token, OpenAI runtime API key, PostgreSQL credentials, webhook secret, backup encryption key.
+Protected material: Plaid client ID, Plaid production secret, Plaid access token, runtime agent provider API key(s) (OpenAI and/or Anthropic, per ADR-014), PostgreSQL credentials, webhook secret, backup encryption key.
 
 Stored as systemd encrypted credentials on the VPS. Never in committed files, never in a plaintext `.env`, never in CI, never in an agent session. `.claude/settings.json` denies reads of credential paths and blocks `ssh`/`scp`/`rsync`, so the engineering environment has no route to production even if a session misjudges.
 

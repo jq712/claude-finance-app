@@ -1,6 +1,6 @@
 # ADR-013: Claude Code for engineering, OpenAI for the runtime agent
 
-**Status:** Accepted
+**Status:** Accepted — runtime-provider portion superseded by [ADR-014](ADR-014-provider-interchangeable-runtime-agent.md); the engineering-agent split below still holds.
 
 ## Context
 
@@ -23,3 +23,5 @@ The two never share credentials, context, or configuration.
 ## Revisit when
 
 The owner decides to move the runtime agent to the Claude API, or a capability gap makes the current split costly. The swap should be contained to `src/finance_app/agent/`.
+
+**Triggered:** the owner asked for the runtime agent to support both providers, not a one-time swap. See ADR-014.

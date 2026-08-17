@@ -8,7 +8,7 @@ The Plaid access token is the single most dangerous artifact in the system: it g
 
 ## Decision
 
-Production secret material — Plaid client ID and secret, Plaid access token, OpenAI runtime key, PostgreSQL credentials, webhook secret, backup encryption key — exists only inside the production runtime boundary, as systemd encrypted credentials. Never in the repository, never in CI, never in a Claude Code session context.
+Production secret material — Plaid client ID and secret, Plaid access token, runtime agent provider API key(s) (OpenAI and/or Anthropic, per ADR-014), PostgreSQL credentials, webhook secret, backup encryption key — exists only inside the production runtime boundary, as systemd encrypted credentials. Never in the repository, never in CI, never in a Claude Code session context.
 
 ## Consequences
 
