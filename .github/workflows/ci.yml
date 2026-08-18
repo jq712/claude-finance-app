@@ -96,6 +96,43 @@ jobs:
       - name: role-boundary tests (finance_agent must never mutate plaid.*)
         run: uv run pytest tests/security -v -m integration
 
+  agent-evals:
+    # Milestone 6 (handoff §24/§29): the golden-dataset regression harness
+    # against whichever real AgentProvider(s) are configured. Calls a real
+    # model and spends API budget — tests/agent_evals/conftest.py skips the
+    # whole suite with pytest.skip() whenever neither OPENAI_API_KEY nor
+    # ANTHROPIC_API_KEY is set, so an ordinary PR with no repo secrets
+    # configured never spends budget or fails CI over a skipped suite.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: finance_migrator
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: finance_dev
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U finance_migrator -d finance_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev
+      AGENT_DATABASE_URL: postgresql+psycopg://finance_agent:devpassword@localhost:5433/finance_dev
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run alembic upgrade head
+      - run: uv run pytest tests/agent_evals -v -m agent_eval
+
   secret-scan:
     runs-on: ubuntu-latest
     permissions:
