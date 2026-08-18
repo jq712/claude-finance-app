@@ -99,11 +99,11 @@ jobs:
   agent-evals:
     # Milestone 6 (handoff §24/§29): the golden-dataset regression harness
     # against whichever real AgentProvider(s) are configured. Calls a real
-    # model and spends API budget, so the job only runs at all when a repo
-    # secret is present — an ordinary PR with no keys configured must never
-    # spend budget or fail CI over a skipped suite.
+    # model and spends API budget — tests/agent_evals/conftest.py skips the
+    # whole suite with pytest.skip() whenever neither OPENAI_API_KEY nor
+    # ANTHROPIC_API_KEY is set, so an ordinary PR with no repo secrets
+    # configured never spends budget or fails CI over a skipped suite.
     runs-on: ubuntu-latest
-    if: ${{ secrets.OPENAI_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '' }}
     services:
       postgres:
         image: postgres:17-alpine
