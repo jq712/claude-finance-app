@@ -5,6 +5,7 @@ numbers; it never produces them")."""
 
 import datetime
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -98,7 +99,7 @@ def get_category_summary(session: Session, args: Mapping[str, Any]) -> dict[str,
     style question — presentation only, no new arithmetic."""
     start, end = require_period(args)
     by_category = _get_spending_by_category(session, start=start, end=end)
-    total = sum(by_category.values(), start=by_category[next(iter(by_category))].__class__(0))
+    total = sum(by_category.values(), Decimal("0"))
     return {
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         "category_count": len(by_category),

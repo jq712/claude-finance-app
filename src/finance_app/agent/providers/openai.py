@@ -96,9 +96,17 @@ class OpenAIProvider:
             # This adapter only ever offers function tools (`_tool_to_openai`),
             # so the response can only contain function tool calls back.
             call = cast(ChatCompletionMessageFunctionToolCall, message.tool_calls[0])
+            try:
+                arguments = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                # A malformed arguments string from the API is treated as
+                # "no usable arguments" rather than crashing the turn — the
+                # target tool's own required-field validation then raises
+                # the same structured ToolInputError an ordinary missing
+                # argument would, keeping this on the one error path
+                # agent/loop.py already audits and recovers from.
+                arguments = {}
             return ToolCallRequest(
-                call_id=call.id,
-                tool_name=call.function.name,
-                arguments=json.loads(call.function.arguments or "{}"),
+                call_id=call.id, tool_name=call.function.name, arguments=arguments
             )
         return FinalMessage(content=message.content or "")

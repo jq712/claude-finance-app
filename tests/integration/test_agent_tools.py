@@ -164,6 +164,29 @@ def test_get_category_summary_includes_total(seeded) -> None:
     assert result["category_count"] == 1
 
 
+def test_get_category_summary_handles_period_with_no_spending(seeded) -> None:
+    """Regression test (qa-adversarial finding, fixed): `get_category_summary`
+    used to compute its total via
+    `sum(by_category.values(), start=by_category[next(iter(by_category))].__class__(0))`
+    (src/finance_app/agent/tools/read.py). When `by_category` is empty —
+    any date range with zero spending, trivially reachable by asking the
+    agent about a slow period — `next(iter({}))` raised `StopIteration`.
+    Fixed by summing against a fixed `Decimal("0")` start value instead of
+    deriving one from the (possibly empty) dict. `agent/loop.py` also
+    gained a broader exception catch as defense-in-depth for the general
+    class of bug this represented — see test_agent_loop.py's
+    `test_tool_handler_raising_a_non_tool_input_error_does_not_crash_the_loop`.
+
+    A period with no spending must degrade to a zero total, not crash.
+    """
+    session, _ = seeded
+    empty_period = {"start": "2020-01-01", "end": "2020-01-02"}
+    result = get_category_summary(session, empty_period)
+    assert result["total_spent"] == "0.00"
+    assert result["category_count"] == 0
+    assert result["categories"] == []
+
+
 def test_calculate_cashflow(seeded) -> None:
     session, _ = seeded
     result = calculate_cashflow(session, _AUGUST)

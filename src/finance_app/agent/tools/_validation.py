@@ -95,6 +95,11 @@ def require_amount(args: Mapping[str, Any], key: str) -> Decimal:
         amount = Decimal(str(raw))
     except InvalidOperation as exc:
         raise ToolInputError(f"{key!r} must be a valid decimal amount") from exc
+    # A JSON `number` can carry binary float drift (e.g. 19.999999999999996)
+    # if a provider ever serializes one that wasn't a clean literal to begin
+    # with. Quantizing to cents here, before the amount is ever stored,
+    # keeps that drift from becoming the persisted budget figure verbatim.
+    amount = amount.quantize(Decimal("0.01"))
     if amount <= 0:
         raise ToolInputError(f"{key!r} must be positive")
     if amount > Decimal("1000000"):

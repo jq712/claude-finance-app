@@ -41,16 +41,24 @@ def _audit_tool_call(
     *,
     conversation_id: int | None,
     tool_name: str,
-    arguments: Mapping[str, Any],
+    arguments: object,
     result: dict[str, Any],
     is_write: bool,
     provider_name: str,
 ) -> None:
+    # `arguments` comes straight from the provider and is not guaranteed to
+    # be a dict (see the malformed-shape guard in `_execute_tool_call`) —
+    # auditing must never itself raise on a value it's only trying to
+    # record.
+    try:
+        stored_arguments = dict(arguments)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        stored_arguments = {"_unparseable_arguments": repr(arguments)[:500]}
     session.add(
         ToolCall(
             conversation_id=conversation_id,
             tool_name=tool_name,
-            arguments=dict(arguments),
+            arguments=stored_arguments,
             result_summary=result,
             is_write=is_write,
             provider=provider_name,
@@ -68,10 +76,13 @@ def _execute_tool_call(
 ) -> dict[str, Any]:
     """Run one requested tool call and audit it, regardless of outcome.
 
-    An unknown tool name or a validation failure both produce a
-    structured error result for the model — never an unhandled exception
-    that crashes the conversation, and never a call that reaches the
-    database without going through a registered tool's own validation.
+    An unknown tool name, malformed arguments, a validation failure, or
+    any other exception a handler raises all produce a structured error
+    result for the model — never an unhandled exception that crashes the
+    conversation. The handler itself runs inside a SAVEPOINT so a failure
+    partway through a write (e.g. a constraint violation surfacing from
+    `session.flush()`) rolls back only this tool call, not the rest of
+    this turn's already-applied work.
     """
     tool = TOOLS_BY_NAME.get(request.tool_name)
     if tool is None:
@@ -87,10 +98,35 @@ def _execute_tool_call(
         )
         return result
 
+    if not isinstance(request.arguments, Mapping):
+        result = {"error": "tool arguments must be a JSON object"}
+        _audit_tool_call(
+            session,
+            conversation_id=conversation_id,
+            tool_name=tool.name,
+            arguments=request.arguments,
+            result=result,
+            is_write=tool.is_write,
+            provider_name=provider_name,
+        )
+        return result
+
     try:
-        result = tool.handler(session, request.arguments)
+        with session.begin_nested():
+            result = tool.handler(session, request.arguments)
     except ToolInputError as exc:
         result = {"error": str(exc)}
+    except Exception:
+        # A bug in a tool handler (or an unexpected DB error surfacing
+        # from it) must degrade to a structured result the model can see
+        # and the audit trail can record — not crash the whole turn, and
+        # not the entire interactive `chat` session sitting above it.
+        # Full detail goes to the operational log, never to the model.
+        logger.exception(
+            "tool handler raised an unexpected exception",
+            extra={"tool_name": tool.name, "conversation_id": conversation_id},
+        )
+        result = {"error": "an internal error occurred while running this tool"}
 
     _audit_tool_call(
         session,
