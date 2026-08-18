@@ -1,10 +1,17 @@
-"""Adversarial coverage for `alembic downgrade -1` / `upgrade head` on the
+"""Adversarial coverage for `alembic downgrade` / `upgrade head` on the
 roles-and-grants migration (0002_fc8bd0e714f9). Handoff §29's Milestone 1
 exit criteria requires "migration test strategy exists"; the existing
 `tests/integration/test_migrations.py` only checks the forward-applied
 state. Nothing exercises downgrade, which is the migration most likely to
 leave the database in a broken state — it drops five live database roles
 and their default-privilege entries.
+
+Downgrades target the roles migration's own down_revision
+(`b7f6fdafce87`, the initial schema) explicitly rather than the relative
+`-1` — `-1` only reverts whichever migration is newest at head, which
+stopped being the roles migration once 0003 (agent tool_calls provider
+column) landed on top of it. An explicit target keeps this test pinned to
+the roles migration regardless of what's added above it later.
 
 These tests are destructive to the dev database's role set (they actually
 drop and recreate finance_owner/finance_app/finance_agent/
@@ -59,7 +66,7 @@ def restore_to_head():
 
 
 def test_downgrade_then_upgrade_round_trips_cleanly(restore_to_head, role_engine) -> None:
-    down = _run_alembic("downgrade", "-1")
+    down = _run_alembic("downgrade", "b7f6fdafce87")
     assert down.returncode == 0, f"downgrade failed:\n{down.stdout}\n{down.stderr}"
 
     # While downgraded, the least-privilege roles must not exist at all —
@@ -116,7 +123,7 @@ def test_round_trip_does_not_duplicate_default_privilege_entries(
     before = _default_acl_row_count()
 
     for _ in range(2):
-        d = _run_alembic("downgrade", "-1")
+        d = _run_alembic("downgrade", "b7f6fdafce87")
         assert d.returncode == 0, f"downgrade failed:\n{d.stdout}\n{d.stderr}"
         u = _run_alembic("upgrade", "head")
         assert u.returncode == 0, f"upgrade failed:\n{u.stdout}\n{u.stderr}"
@@ -144,7 +151,7 @@ def test_downgrade_revokes_access_for_a_connection_opened_before_it_ran(
     with app_engine.connect() as held_open:
         held_open.execute(text("SELECT 1"))
 
-        down = _run_alembic("downgrade", "-1")
+        down = _run_alembic("downgrade", "b7f6fdafce87")
         assert down.returncode == 0, f"downgrade failed:\n{down.stdout}\n{down.stderr}"
 
         # The already-open connection survives the role's own deletion...

@@ -20,6 +20,7 @@ none of these commands touch the runtime agent provider (OpenAI or Anthropic) or
 | `finance budget [--month YYYY-MM]` | Active budgets against actual spend for a period. |
 | `finance transactions recent [--days N] [--limit N]` | Most recent transactions, newest first. |
 | `finance transactions search QUERY [--days N] [--limit N]` | Case-insensitive substring match on name/merchant. |
+| `finance chat` | Interactive conversation with the runtime financial agent (Milestone 5). Requires a reachable database and the active `AGENT_PROVIDER`'s API key — see [`docs/financial-agent.md`](financial-agent.md). |
 | `finance version` | Print the application version. |
 
 `--month` defaults to the current calendar month everywhere it appears; periods are the same

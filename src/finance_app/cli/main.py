@@ -1,18 +1,32 @@
 import datetime
 
 import typer
+from anthropic import AnthropicError
+from openai import OpenAIError
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from finance_app import __version__
+from finance_app.agent.conversation import (
+    append_turn,
+    end_conversation,
+    load_history,
+    start_conversation,
+)
+from finance_app.agent.db import agent_session_scope
+from finance_app.agent.loop import run_agent_turn
+from finance_app.agent.prompts import system_prompt_for
+from finance_app.agent.providers import build_provider
 from finance_app.analytics.budgeting import get_budget_status
 from finance_app.analytics.cashflow import calculate_cashflow
 from finance_app.analytics.income import get_income_summary
 from finance_app.analytics.periods import month_bounds
 from finance_app.analytics.spending import get_spending_by_category, get_spending_summary
 from finance_app.analytics.transactions import TransactionRecord, list_recent, search_transactions
+from finance_app.config.settings import MissingProviderCredentialError, get_settings
+from finance_app.db.models.agent import Conversation
 from finance_app.db.models.plaid import Account, Item, SyncState
 from finance_app.db.session import session_scope
 from finance_app.plaid.sync import PlaidSyncError, run_daily_sync
@@ -221,6 +235,74 @@ def transactions_search(
 def version() -> None:
     """Print the application version."""
     typer.echo(__version__)
+
+
+@app.command()
+def chat() -> None:
+    """Interactive conversation with the runtime financial agent.
+
+    Provider selected by AGENT_PROVIDER (ADR-014). Every other `finance`
+    command works without the LLM or its credential; this is the one
+    command that needs both a reachable database and the active
+    provider's API key, and fails fast with a clear message if either is
+    missing rather than deep inside a conversation turn.
+    """
+    console = Console()
+    settings = get_settings()
+    try:
+        provider = build_provider(settings)
+    except MissingProviderCredentialError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    system_prompt = system_prompt_for(provider.provider_name)
+
+    try:
+        with agent_session_scope() as session:
+            conversation_id = start_conversation(session).id
+    except SQLAlchemyError as exc:
+        typer.secho(f"database unavailable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"finance chat ({provider.provider_name}). Type 'exit' or Ctrl-D to quit.")
+    try:
+        while True:
+            try:
+                user_message = console.input("[bold]you>[/bold] ").strip()
+            except EOFError:
+                console.print()
+                break
+            if not user_message:
+                continue
+            if user_message.casefold() in {"exit", "quit"}:
+                break
+
+            with agent_session_scope() as session:
+                history = load_history(session, conversation_id=conversation_id)
+                try:
+                    reply = run_agent_turn(
+                        session,
+                        provider=provider,
+                        system_prompt=system_prompt,
+                        history=history,
+                        user_message=user_message,
+                        conversation_id=conversation_id,
+                    )
+                except (OpenAIError, AnthropicError) as exc:
+                    console.print(f"[red]agent provider error:[/red] {exc}")
+                    continue
+                append_turn(
+                    session,
+                    conversation_id=conversation_id,
+                    user_message=user_message,
+                    assistant_message=reply,
+                )
+            console.print(f"[bold cyan]agent>[/bold cyan] {reply}")
+    finally:
+        with agent_session_scope() as session:
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is not None:
+                end_conversation(session, conversation)
 
 
 if __name__ == "__main__":
