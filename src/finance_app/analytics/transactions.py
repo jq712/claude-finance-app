@@ -49,6 +49,18 @@ def list_recent(
     return [_to_record(t) for t in ordered[:limit]]
 
 
+def list_transactions(
+    session: Session, *, start: datetime.date, end: datetime.date, limit: int = 50
+) -> list[TransactionRecord]:
+    """Every transaction in `[start, end)`, newest first, capped at
+    `limit`. Unlike `list_recent`, the caller supplies the range directly
+    rather than a lookback window from today — this is what the agent's
+    `get_transactions` tool needs for an arbitrary user-specified period."""
+    txns = fetch_effective_transactions(session, start=start, end=end)
+    ordered = sorted(txns, key=lambda t: (t.date, t.transaction_id), reverse=True)
+    return [_to_record(t) for t in ordered[:limit]]
+
+
 def search_transactions(
     session: Session,
     *,

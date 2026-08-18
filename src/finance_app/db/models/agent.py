@@ -68,6 +68,10 @@ class ToolCall(Base):
     arguments: Mapped[dict] = mapped_column(JSONB)
     result_summary: Mapped[dict | None] = mapped_column(JSONB)
     is_write: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Which AgentProvider adapter served this call ("openai" | "anthropic"),
+    # per ADR-014 — keeps the audit trail legible across a provider switch
+    # and lets Milestone 6 evals filter/compare per provider.
+    provider: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

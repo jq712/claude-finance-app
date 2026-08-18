@@ -17,6 +17,7 @@ dependencies = [
     "httpx>=0.28",
     "plaid-python>=33.0.0",
     "openai>=1.59",
+    "anthropic>=0.40",
 ]
 
 [project.scripts]
