@@ -53,7 +53,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
 "migrations/versions/*.py" = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "evals"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "basic"
@@ -63,4 +63,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "integration: requires a running PostgreSQL test container",
+    "agent_eval: requires a running PostgreSQL test container and a real configured AgentProvider credential (OPENAI_API_KEY/ANTHROPIC_API_KEY); calls a real model and spends API budget",
 ]
