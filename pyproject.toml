@@ -31,6 +31,15 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/finance_app"]
 
+[tool.uv]
+# Milestone 7 `dependency-scan` CI job (pip-audit) found CVE-2026-84379,
+# CVE-2026-84380, and CVE-2026-84382 in httpx2 2.10.0 -- pulled in
+# transitively by `openai` (its internal HTTP client fork), not a direct
+# dependency of this project. openai's own constraint (httpx2<3,>=2.7.0)
+# already permits the fixed release; this override just pins to it
+# explicitly instead of waiting on openai to raise its floor.
+override-dependencies = ["httpx2>=2.12.0"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
