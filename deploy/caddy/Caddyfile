@@ -1,0 +1,31 @@
+# INACTIVE — Milestone 8 scaffold only.
+#
+# This file is not started by default: `deploy/compose.yaml`'s `caddy`
+# service is behind the `webhook` Compose profile
+# (`docker compose --profile webhook up -d`), which nothing in this
+# milestone enables. It exists now so Milestone 8 (Plaid webhook, handoff
+# §29) only has to fill in the actual route, not design reverse-proxy/TLS
+# from scratch, and so `docs/deployment.md` can describe the full target
+# topology today.
+#
+# When Milestone 8 lands:
+#   - replace {$WEBHOOK_DOMAIN} with the owner-provisioned domain (handoff
+#     §32 — a domain/DNS choice needing owner input);
+#   - Caddy handles ACME/TLS automatically once a real domain resolves to
+#     this host — no certificate material is ever checked into this repo;
+#   - the webhook handler validates Plaid's webhook signature (handoff
+#     §6.4) before ever touching sync state — reverse-proxy termination is
+#     not a substitute for that application-level check;
+#   - nothing else is exposed here. The CLI/chat/finops surface stays
+#     SSH-only (handoff §5) and is never proxied.
+{$WEBHOOK_DOMAIN:webhook.example.invalid} {
+	reverse_proxy app:8080
+
+	# Plaid signs webhook requests; validation happens in the app itself
+	# (finance_app.plaid.webhook, Milestone 8). This proxy layer only
+	# terminates TLS and forwards — it makes no trust decision.
+	log {
+		output stdout
+		format json
+	}
+}

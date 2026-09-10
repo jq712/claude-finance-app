@@ -1,0 +1,43 @@
+[Unit]
+Description=finance-app production stack (docker compose)
+Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/deployment.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/finance-app
+
+# Production secret material (handoff §4.4, ADR-010) — minted once via
+# `systemd-creds encrypt` per docs/runbooks/deploy.md, never as plaintext
+# files or environment variables on disk. Decrypted only into this unit's
+# private $CREDENTIALS_DIRECTORY for the lifetime of the service.
+LoadCredentialEncrypted=plaid_client_id:/etc/finance-app/credentials/plaid_client_id.cred
+LoadCredentialEncrypted=plaid_secret:/etc/finance-app/credentials/plaid_secret.cred
+LoadCredentialEncrypted=plaid_access_token:/etc/finance-app/credentials/plaid_access_token.cred
+LoadCredentialEncrypted=plaid_webhook_secret:/etc/finance-app/credentials/plaid_webhook_secret.cred
+LoadCredentialEncrypted=openai_api_key:/etc/finance-app/credentials/openai_api_key.cred
+LoadCredentialEncrypted=anthropic_api_key:/etc/finance-app/credentials/anthropic_api_key.cred
+LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
+LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
+LoadCredentialEncrypted=finance_agent_db_password:/etc/finance-app/credentials/finance_agent_db_password.cred
+LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred
+LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
+LoadCredentialEncrypted=backup_encryption_key:/etc/finance-app/credentials/backup_encryption_key.cred
+
+# Non-secret, per-host configuration (RELEASE_ID, CONTAINER_IMAGE_REPO,
+# AGENT_PROVIDER, ...) — safe to keep as a plain file since it holds no
+# credential material; updated by `finops deploy`/by hand, never by CI.
+EnvironmentFile=-/etc/finance-app/env
+
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml up -d
+ExecStop=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml down
+ExecReload=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml restart app
+
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

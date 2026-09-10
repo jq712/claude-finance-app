@@ -1,0 +1,23 @@
+[Unit]
+Description=finance-app: aggregate health check (handoff §10, §23)
+Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/deployment.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/finance-app
+
+# Uses finance_app (not finance_observer) — see ops/health.py's module
+# docstring: this unit's `check_health()` writes an ops.errors row on
+# failure, which finance_observer cannot do.
+LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
+LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
+LoadCredentialEncrypted=finance_agent_db_password:/etc/finance-app/credentials/finance_agent_db_password.cred
+LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred
+LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
+EnvironmentFile=-/etc/finance-app/env
+
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml run --rm -T app python -m finance_app.ops.health
+
+TimeoutStartSec=120

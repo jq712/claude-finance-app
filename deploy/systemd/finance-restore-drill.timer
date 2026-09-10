@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly restore-verification drill (ADR-015 — "a backup that has never been restored is not verified")
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

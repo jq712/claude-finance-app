@@ -1,0 +1,164 @@
+# Production topology (handoff §20, §29 Milestone 7; ADR-008, ADR-011).
+#
+#   app        the finance-app image — `finance`/`finops` entrypoints,
+#              plus the Plaid sync/backup/health jobs invoked by
+#              deploy/systemd/ timers via `docker compose run --rm app ...`
+#   postgres   PostgreSQL 17, matching the pinned pg_dump/pg_restore client
+#              baked into the app image (Dockerfile)
+#   caddy      reverse proxy for the future Plaid webhook endpoint
+#              (Milestone 8) — not started by default, see the `webhook`
+#              profile below and deploy/caddy/Caddyfile
+#
+# No secret is ever baked into this file or into the image. Every
+# credential-shaped value below is read from the environment at container
+# start — in production that environment is populated from systemd
+# encrypted credentials by deploy/systemd/finance-app.service
+# (`LoadCredentialEncrypted=`, ADR-010); in development it comes from a
+# local, gitignored `.env` seeded from `.env.example`.
+#
+# The app container itself never runs long-lived scheduled work — no
+# in-process scheduler (ADR-011). It stays up only to be reachable for
+# `finops restart`/interactive `finance chat`/etc.; sync/backup/health run
+# as one-shot `docker compose run --rm app ...` invocations from systemd
+# timers, sharing this same image and network so they see the same
+# `postgres` service by name.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      # Bootstrap/DDL role only — see docs/database.md. Its password is a
+      # systemd encrypted credential in production, never a plaintext
+      # environment default as in deploy/compose.dev.yaml.
+      POSTGRES_USER: finance_migrator
+      POSTGRES_PASSWORD: ${FINANCE_MIGRATOR_DB_PASSWORD:?FINANCE_MIGRATOR_DB_PASSWORD is required}
+      POSTGRES_DB: finance
+    volumes:
+      - finance-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance_migrator -d finance"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # No published port: only `app` (and, on the same Docker network,
+    # `docker compose run` one-shot jobs) reach Postgres. The financial
+    # database is never directly reachable from outside the compose
+    # network — see docs/security-model.md.
+    expose:
+      - "5432"
+
+  app:
+    # `RELEASE_ID` is set by `finops deploy <release-id>`/`finops
+    # rollback` before invoking `docker compose up`/`pull` (see
+    # src/finance_app/ops/compose.py); it defaults to `latest` only for a
+    # first-ever manual bring-up, never as the sole production identifier
+    # (ADR-008 — `finops deploy` always pins an explicit Git SHA).
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FINANCE_ENV: production
+      RELEASE_ID: ${RELEASE_ID:-}
+      DATABASE_URL: postgresql+psycopg://finance_app:${FINANCE_APP_DB_PASSWORD:?FINANCE_APP_DB_PASSWORD is required}@postgres:5432/finance
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD:?FINANCE_MIGRATOR_DB_PASSWORD is required}@postgres:5432/finance
+      AGENT_DATABASE_URL: postgresql+psycopg://finance_agent:${FINANCE_AGENT_DB_PASSWORD:?FINANCE_AGENT_DB_PASSWORD is required}@postgres:5432/finance
+      OBSERVER_DATABASE_URL: postgresql+psycopg://finance_observer:${FINANCE_OBSERVER_DB_PASSWORD:?FINANCE_OBSERVER_DB_PASSWORD is required}@postgres:5432/finance
+      BACKUP_DATABASE_URL: postgresql+psycopg://finance_backup:${FINANCE_BACKUP_DB_PASSWORD:?FINANCE_BACKUP_DB_PASSWORD is required}@postgres:5432/finance
+      PLAID_ENV: production
+      PLAID_CLIENT_ID: ${PLAID_CLIENT_ID:?PLAID_CLIENT_ID is required}
+      PLAID_SECRET: ${PLAID_SECRET:?PLAID_SECRET is required}
+      PLAID_ACCESS_TOKEN: ${PLAID_ACCESS_TOKEN:?PLAID_ACCESS_TOKEN is required}
+      PLAID_WEBHOOK_SECRET: ${PLAID_WEBHOOK_SECRET:-}
+      AGENT_PROVIDER: ${AGENT_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
+      BACKUP_DIR: /var/lib/finance-app/backups
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+    volumes:
+      # Backup staging area — matches deploy/systemd/finance-backup.service's
+      # `BindPaths=` mount of the same host directory. Off-machine transfer
+      # of this directory's contents is a separate, owner-performed step
+      # (docs/backups.md); this volume is not itself durable/off-host
+      # storage.
+      - finance-backups:/var/lib/finance-app/backups
+    # No published port: the CLI/chat/finops surface is used via
+    # `docker compose exec`/`docker compose run`, over SSH to the host —
+    # never exposed to the network (handoff §5). Only Milestone 8's
+    # webhook endpoint, behind `caddy`, will ever be publicly reachable.
+    expose: []
+    # Keep the container up for `docker compose exec`/interactive use;
+    # sync/backup/health run as separate one-shot `run --rm` invocations,
+    # not inside this long-lived process.
+    command: ["finance", "status"]
+
+  # Control-plane container for `finops deploy`/`rollback`/`restart` only
+  # (deploy/scripts/finops.sh) — never started by `docker compose up`, only
+  # `run --rm --profile deploy deploy finops ...`. This is the *one*
+  # service in this file with Docker socket access, deliberately kept
+  # separate from the long-running `app` service, which handles Plaid/
+  # model API calls and interactive `finance chat` and must never be able
+  # to control the Docker daemon. The bind mount below uses the identical
+  # path on both sides of the mount (a standard docker-outside-of-docker
+  # requirement): `docker compose` running inside this container, talking
+  # to the host daemon over the socket, resolves relative paths in this
+  # very file (e.g. `./caddy/Caddyfile`) against the daemon's — i.e. the
+  # host's — filesystem, so the in-container path has to match the host
+  # path for that resolution to land on a real file.
+  deploy:
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:latest
+    profiles: ["deploy"]
+    # The image's default user (uid 1000, "finance") normally can't read
+    # /var/run/docker.sock — its host-side group ownership varies by
+    # distribution. Running this one service as root is not a meaningful
+    # privilege escalation: mounting the Docker socket at all already
+    # grants root-equivalent control of the host, regardless of which uid
+    # the process inside the container runs as. See docs/security-model.md.
+    user: root
+    environment:
+      # Only what release bookkeeping and the post-deploy health check
+      # need — never Plaid/model credentials. `finops deploy`/`rollback`/
+      # `restart` never touch financial data.
+      CONTAINER_IMAGE_REPO: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}
+      DATABASE_URL: postgresql+psycopg://finance_app:${FINANCE_APP_DB_PASSWORD:?FINANCE_APP_DB_PASSWORD is required}@postgres:5432/finance
+      OBSERVER_DATABASE_URL: postgresql+psycopg://finance_observer:${FINANCE_OBSERVER_DB_PASSWORD:?FINANCE_OBSERVER_DB_PASSWORD is required}@postgres:5432/finance
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${FINANCE_APP_DIR:-/opt/finance-app}:${FINANCE_APP_DIR:-/opt/finance-app}:ro
+    working_dir: ${FINANCE_APP_DIR:-/opt/finance-app}
+
+  # Milestone 8 scaffold — not started by default (`--profile webhook`
+  # required). Documents the intended shape now so Milestone 8 only has
+  # to fill in the webhook route and enable the profile, not design the
+  # topology from scratch. See deploy/caddy/Caddyfile.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["webhook"]
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - finance-caddy-data:/data
+      - finance-caddy-config:/config
+
+networks:
+  default:
+    # Fixed name so deploy/scripts/restore-verify.sh can attach its
+    # throwaway restore-drill container to the same network by name,
+    # rather than guessing Compose's auto-generated project network name.
+    name: finance-app
+
+volumes:
+  finance-postgres-data:
+  finance-backups:
+  finance-caddy-data:
+  finance-caddy-config:

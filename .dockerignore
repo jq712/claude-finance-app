@@ -1,0 +1,28 @@
+# Keep the build context small and never let anything secret or
+# environment-specific reach the Docker build (CLAUDE.md, ADR-010).
+.git/
+.github/
+.claude/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+backups/
+*.dump
+*.dump.gpg
+docs/
+evals/
+tests/
+claude-code/
+*.md
+!README.md

@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily Plaid transaction sync (ADR-011, ADR-012 — permanent reconciliation, even after webhooks)
+
+[Timer]
+# Once daily. Randomized to spread load slightly and avoid always hitting
+# Plaid at exactly the same second; Persistent=true means a sync that was
+# due while the VPS was off (reboot, maintenance) runs shortly after next
+# boot instead of silently waiting a full day — bounding staleness is the
+# entire point of ADR-012.
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
