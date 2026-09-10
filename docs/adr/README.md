@@ -20,3 +20,4 @@ Format: **Context** (what forced the decision) Â· **Decision** (what we chose) Â
 | [012](ADR-012-daily-sync-reconciliation-fallback.md) | Daily sync remains the reconciliation fallback |
 | [013](ADR-013-claude-code-engineering-openai-runtime.md) | Claude Code for engineering, OpenAI for the runtime agent (runtime-provider portion superseded by ADR-014) |
 | [014](ADR-014-provider-interchangeable-runtime-agent.md) | Provider-interchangeable runtime financial agent (OpenAI or Claude API) |
+| [015](ADR-015-backup-encryption-gpg-symmetric.md) | Backup encryption via GPG symmetric encryption, keyed by a single systemd credential |

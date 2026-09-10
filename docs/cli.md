@@ -53,3 +53,32 @@ transaction," not one per command.
 2. Reuse `_resolve_period()` for any command that takes `--month`.
 3. Add both a unit test (argument parsing, `status` without a database) and an integration test
    against the golden dataset (`tests/integration/test_cli.py`), matching the existing pattern.
+
+## `finops` (Milestone 7) — the production operations interface
+
+A second, separate entrypoint (`src/finance_app/cli/finops.py`) — not a subcommand of `finance`
+— because its authority is different: `finance` is the user-facing app; `finops` is the narrow
+diagnostic/deployment surface handoff §10 requires so autonomous engineering agents never need
+`psql`/shell/SSH against production. See `docs/deployment.md` for the full design.
+
+| Command | Purpose | Connects as |
+| --- | --- | --- |
+| `finops version [--json]` | App version + running release id | `finance_observer` |
+| `finops health [--json]` | Aggregate database/migration/sync/backup health; exits non-zero if unhealthy | `finance_observer` |
+| `finops sync-status [--json]` | Most recent Plaid sync run and cursor state | `finance_observer` |
+| `finops db-status [--json]` | Database reachability | `finance_observer` |
+| `finops migration-status [--json]` | Applied Alembic revision vs. repo head | `finance_observer` |
+| `finops backup-status [--json]` | Most recent backup and whether it's restore-verified | `finance_observer` |
+| `finops recent-errors [--limit N] [--json]` | Recent sanitized `ops.errors` rows | `finance_observer` |
+| `finops restart` | `docker compose restart app` only | none (shells to `docker compose`) |
+| `finops deploy <sha>` | Pull, deploy, health-check, promote-or-auto-rollback (ADR-008) | `finance_app` (write) + `docker compose` |
+| `finops rollback` | Promote the tracked previous release back to current | `finance_app` (write) + `docker compose` |
+
+Every read command connects as `finance_observer` — strictly read-only, never a financial
+payload in the output (`src/finance_app/ops/db.py`). `deploy`/`rollback` are the only commands
+that change production state, and they do so narrowly: a `docker compose` operation on the stack
+already running on the host (`src/finance_app/ops/compose.py`) plus a bookkeeping row in
+`ops.releases` (`src/finance_app/ops/release.py`). None of them accept a SQL string, a shell
+string, or an arbitrary command — see `docs/deployment.md` for exactly how `deploy`/`rollback`/
+`restart` are invoked in production (they run inside a narrowly-scoped Compose service with
+Docker socket access, kept separate from the long-running `app` service).

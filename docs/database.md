@@ -10,7 +10,7 @@ Milestone 1 deliverable. PostgreSQL, SQLAlchemy 2.x models, Alembic migrations. 
 | `user` | `transaction_category_overrides`, `transaction_tags`, `transaction_notes`, `preferences` — interpretation | `finance_app`, `finance_agent` |
 | `finance` | `budgets` — modeled user constructs | `finance_app`, `finance_agent` |
 | `agent` | `conversations`, `messages`, `analysis_runs`, `tool_calls`, `category_suggestions` — audit trail | `finance_app`, `finance_agent` |
-| `ops` | `job_runs`, `sync_runs`, `errors` — sanitized operational state | `finance_app` only |
+| `ops` | `job_runs`, `sync_runs`, `errors`, `backup_runs`, `releases` — sanitized operational state | `finance_app` only |
 
 `plaid.transactions` is never hard-deleted. A Plaid `removed` event sets `removed_at` instead — provenance is never destroyed (handoff §4.1). `finance.budgets` is deliberately not split into a separate `budget_categories` table: one budget is one category's monthly amount, matching how the CLI and the agent's `create_budget`/`update_budget` tools present it (handoff §7 — do not over-normalize without a demonstrated need).
 
@@ -24,10 +24,12 @@ Created by `migrations/versions/0002_..._roles_and_grants.py`. `finance_migrator
 | `finance_migrator` | DDL; creates the other five roles | `alembic upgrade` only |
 | `finance_app` | `SELECT/INSERT/UPDATE/DELETE` on all five schemas | the deterministic application (ingestion, CLI, budgeting) |
 | `finance_agent` | `SELECT` only on `plaid.*`; full DML on `user.*`/`finance.*`/`agent.*`; no grant on `ops.*` | the runtime conversational agent's tool layer |
-| `finance_observer` | `SELECT` only on `ops.*` | `finops` health/status commands |
-| `finance_backup` | `SELECT` only, every schema | `pg_dump` |
+| `finance_observer` | `SELECT` only on `ops.*`, plus (as of migration `0004`) `plaid.items`/`plaid.sync_state`/`public.alembic_version` | `finops` health/status commands |
+| `finance_backup` | `SELECT` only, every schema, every sequence, plus `public.alembic_version` | `pg_dump` (`deploy/scripts/backup.sh`) |
 
 `ALTER DEFAULT PRIVILEGES FOR ROLE finance_migrator` is set for every schema/role pair, so tables added by future migrations inherit the right grants automatically — a new migration doesn't need to touch `0002` or duplicate its grants.
+
+Migration `0004` (Milestone 7) adds `ops.backup_runs`/`ops.releases` (inheriting `0002`'s default-privilege grants automatically) plus three grants outside that pattern, each documented in the migration's own docstring: `finance_backup`/`finance_observer` SELECT on `public.alembic_version` (Alembic's own bookkeeping table lives outside the five application schemas), `finance_observer` SELECT on `plaid.items`/`plaid.sync_state` (narrow, status-only — deliberately not `plaid.accounts`/`plaid.transactions`), and `finance_backup` SELECT on every sequence in every application schema (`pg_dump` reads a table's owning sequence and aborts the whole dump without it — a real failure hit while building the backup script, not a hypothetical one).
 
 Passwords resolve from `<ROLE>_DB_PASSWORD` environment variables, falling back to the `devpassword` literal already used for the dev/test container. That default is synthetic and disposable, never a production credential — production role passwords are provisioned out of band as systemd encrypted credentials (`docs/security-model.md` invariant 4) and are never read from this repository.
 
@@ -35,7 +37,9 @@ Passwords resolve from `<ROLE>_DB_PASSWORD` environment variables, falling back 
 
 - `DATABASE_URL` — the application's own connection, as `finance_app`. `src/finance_app/db/session.py` reads this.
 - `ALEMBIC_DATABASE_URL` — migrations only, as `finance_migrator`. `migrations/env.py` reads this, deliberately not `DATABASE_URL`, because `finance_app` has no DDL rights and migrations must not silently fall back to a role that happens to have more privilege than it needs.
-- The runtime agent's tool layer (Milestone 5) and `finops` (Milestone 7+) will each open their own connection as `finance_agent` / `finance_observer` respectively — they do not share `db/session.py`'s engine, which is `finance_app`-scoped by design.
+- `AGENT_DATABASE_URL` — the runtime agent's tool layer, as `finance_agent`. `src/finance_app/agent/db.py`.
+- `OBSERVER_DATABASE_URL` — `finops`'s read commands (`health`/`sync-status`/`db-status`/`migration-status`/`backup-status`/`recent-errors`), as `finance_observer`. `src/finance_app/ops/db.py`. `finops deploy`/`rollback` are the one exception: they write `ops.releases`, so they use `DATABASE_URL`/`finance_app` instead — see `src/finance_app/cli/finops.py`'s module docstring.
+- `BACKUP_DATABASE_URL` — `pg_dump`, as `finance_backup`. `src/finance_app/ops/backup.py`. Recording the backup's own `ops.backup_runs` row still goes through `DATABASE_URL`/`finance_app`, since `finance_backup` cannot write anywhere.
 
 ## Verifying the boundary
 
