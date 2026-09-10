@@ -104,13 +104,62 @@ def test_finance_observer_is_read_only_on_ops(role_engine) -> None:
         conn.exec_driver_sql("INSERT INTO ops.job_runs (job_name) VALUES ('blocked')")
 
 
-def test_finance_observer_has_no_access_to_plaid_schema(role_engine) -> None:
+def test_finance_observer_has_no_access_to_plaid_financial_data(role_engine) -> None:
+    """migrations/versions/0004 (Milestone 7) gives finance_observer a
+    narrow, table-specific grant on plaid.items/plaid.sync_state for
+    `finops sync-status` — deliberately *not* the rest of the schema.
+    This proves the boundary stayed narrow: transactions/accounts, which
+    hold real financial data, remain unreadable."""
     engine = role_engine("finance_observer")
     with (
         engine.connect() as conn,
         pytest.raises(ProgrammingError, match="permission denied"),
     ):
         conn.exec_driver_sql("SELECT count(*) FROM plaid.transactions")
+    with (
+        engine.connect() as conn,
+        pytest.raises(ProgrammingError, match="permission denied"),
+    ):
+        conn.exec_driver_sql("SELECT count(*) FROM plaid.accounts")
+
+
+def test_finance_observer_can_read_sync_status_metadata_only(role_engine) -> None:
+    """The narrow exception migrations/versions/0004 adds: `finops
+    sync-status` (src/finance_app/ops/status.py) needs Item status and
+    cursor-presence metadata, not transaction content."""
+    engine = role_engine("finance_observer")
+    with engine.connect() as conn:
+        conn.exec_driver_sql("SELECT count(*) FROM plaid.items")
+        conn.exec_driver_sql("SELECT count(*) FROM plaid.sync_state")
+    with (
+        engine.connect() as conn,
+        pytest.raises(ProgrammingError, match="permission denied"),
+    ):
+        conn.exec_driver_sql("INSERT INTO plaid.items DEFAULT VALUES")
+
+
+def test_finance_observer_and_finance_backup_can_read_alembic_version(role_engine) -> None:
+    """migrations/versions/0004: `alembic_version` lives in `public`,
+    outside the five application schemas migrations/versions/0002 grants
+    across. `finops migration-status` needs finance_observer to read it;
+    a full `pg_dump` needs finance_backup to (pg_dump aborts the whole
+    dump, not just skips the table, on a permission-denied read)."""
+    for role in ("finance_observer", "finance_backup"):
+        engine = role_engine(role)
+        with engine.connect() as conn:
+            conn.exec_driver_sql("SELECT version_num FROM alembic_version")
+
+
+def test_finance_backup_can_read_sequences(role_engine) -> None:
+    """migrations/versions/0004: pg_dump reads a table's owning sequence
+    (last_value/is_called) and aborts the entire dump — not just that one
+    table — without SELECT on it. A real failure hit while exercising
+    deploy/scripts/backup.sh against the dev container, not a
+    hypothetical one; see that migration's docstring."""
+    engine = role_engine("finance_backup")
+    with engine.connect() as conn:
+        conn.exec_driver_sql("SELECT last_value FROM plaid.items_id_seq")
+        conn.exec_driver_sql("SELECT last_value FROM ops.backup_runs_id_seq")
 
 
 def test_finance_backup_can_read_every_schema_but_not_write(role_engine) -> None:
