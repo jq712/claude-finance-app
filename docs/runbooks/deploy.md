@@ -19,8 +19,12 @@ Owner-performed. The Claude Code engineering environment never performs any step
 
 Each of the following is minted with `systemd-creds encrypt`, which binds the encrypted credential to this specific host's TPM/machine key (`man systemd-creds`) — a `.cred` file copied to a different host will not decrypt there, which is intentional.
 
+Read the value with `read -rs` (silent, never echoed to the terminal) rather than passing it on the command line — `echo -n '<value>' | ...` lands the plaintext secret in this shell's history file the moment it's typed:
+
 ```
-echo -n '<value>' | sudo systemd-creds encrypt - /etc/finance-app/credentials/<name>.cred
+read -rs -p "value for <name>: " CRED_VALUE; echo
+printf '%s' "$CRED_VALUE" | sudo systemd-creds encrypt - /etc/finance-app/credentials/<name>.cred
+unset CRED_VALUE
 ```
 
 Required credentials (`<name>` matches the systemd unit files' `LoadCredentialEncrypted=name:path` and `deploy/scripts/with-production-env.sh`'s mapping — do not rename one side without the other):
@@ -43,6 +47,37 @@ AGENT_PROVIDER=openai
 LOG_LEVEL=INFO
 ```
 
+## 2.5. Running `finops`/compose commands that need production credentials
+
+`deploy/scripts/with-production-env.sh` only decrypts `systemd-creds`-encrypted
+credentials inside a systemd unit that declares `LoadCredentialEncrypted=`
+(that's what `$CREDENTIALS_DIRECTORY` requires) — a bare interactive SSH
+shell has no route to that TPM/machine-key-bound decryption. Every command
+below that pipes through `with-production-env.sh` therefore runs via
+`systemd-run`, which creates a transient unit with the same credential set
+as `finance-app.service` for the duration of one command:
+
+```
+finops_run() {
+    sudo systemd-run --pty --wait --collect --same-dir \
+        $(sed -n 's/^LoadCredentialEncrypted=/--property=LoadCredentialEncrypted=/p' \
+            /etc/systemd/system/finance-app.service) \
+        -- /opt/finance-app/deploy/scripts/with-production-env.sh \
+           /opt/finance-app/deploy/scripts/finops.sh "$@"
+}
+```
+
+Paste that function into your shell once per SSH session; the rest of this
+runbook calls it as `finops_run deploy <sha>` / `finops_run rollback` /
+`finops_run restart`. The `sed` line derives the `--property=LoadCredentialEncrypted=...` flags
+directly from `finance-app.service` so this can't drift out of sync with
+the unit file's actual credential list. If `with-production-env.sh` is run
+any other way, it now fails loudly with this same command rather than
+silently proceeding with an empty credential set (a real defect found in
+review: `deploy/compose.yaml`'s `${VAR:?required}` interpolation used to
+fail with a confusing "variable is required" error instead of the real
+problem).
+
 ## 3. First deploy
 
 1. Confirm CI is green on `main` and note the commit SHA you intend to deploy (`git log -1 --format=%H`, or read it off the `production-deploy` job's step summary for that push — it publishes readiness for exactly this SHA).
@@ -54,7 +89,7 @@ LOG_LEVEL=INFO
 3. Run the migration and deploy:
    ```
    cd /opt/finance-app
-   deploy/scripts/with-production-env.sh deploy/scripts/finops.sh deploy <sha>
+   finops_run deploy <sha>
    ```
    `finops deploy` runs inside the narrowly-scoped `deploy` Compose service (Docker socket mounted — see that service's comment in `compose.yaml` for why it's split from the long-running `app` service). It pulls the image, brings the stack up under that tag, runs the health check, and either promotes the release to `current` or automatically rolls back — see `docs/deployment.md`.
 4. Verify:
@@ -70,7 +105,7 @@ Once CI has published a new image and the `production` GitHub Environment approv
 
 ```
 cd /opt/finance-app
-deploy/scripts/with-production-env.sh deploy/scripts/finops.sh deploy <sha>
+finops_run deploy <sha>
 ```
 
 That's the entire procedure — no compose file edits, no manual image pulls, no restart choreography. `finops deploy` handles pull, bring-up, health verification, and (on failure) automatic rollback.
@@ -78,7 +113,7 @@ That's the entire procedure — no compose file edits, no manual image pulls, no
 ## 5. Rollback
 
 ```
-deploy/scripts/with-production-env.sh deploy/scripts/finops.sh rollback
+finops_run rollback
 ```
 
 Rolls back to the tracked previous known-good release — no rebuild, no registry fetch beyond what's already local (ADR-008). If `finops rollback` reports no previous release is tracked (e.g. this was the very first deploy), there is nothing to roll back to; fix forward instead.
@@ -86,7 +121,7 @@ Rolls back to the tracked previous known-good release — no rebuild, no registr
 ## 6. Restart (no release change)
 
 ```
-deploy/scripts/with-production-env.sh deploy/scripts/finops.sh restart
+finops_run restart
 ```
 
 Restarts only the `app` container — does not touch Postgres, does not change `ops.releases`. Use this when the app process itself needs to come back (e.g. after a transient resource issue), not as a substitute for a release.

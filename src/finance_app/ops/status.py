@@ -23,12 +23,15 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError as SASQLOperationalError
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from finance_app import __version__
 from finance_app.config.settings import Settings, get_settings
 from finance_app.db.models.ops import BackupRun, OperationalError, Release, SyncRun
 from finance_app.db.models.plaid import Item, SyncState
+from finance_app.ops.compose import DEFAULT_COMPOSE_FILE, ComposeError
+from finance_app.ops.compose import run_compose as _run_compose
 
 # A sync more than this many hours stale is flagged unhealthy — the daily
 # timer's mandatory cadence (ADR-011/ADR-012) means anything beyond ~36h
@@ -72,6 +75,15 @@ def migration_status(session: Session, alembic_ini_path: str = "alembic.ini") ->
         applied = _current_alembic_version(session)
     except SASQLOperationalError as exc:
         return {"status": "unreachable", "detail": type(exc).__name__}
+    except ProgrammingError:
+        # `alembic_version` itself doesn't exist yet -- a database that has
+        # never had `alembic upgrade head` run against it, e.g. the state
+        # of the VPS during the very first `finops deploy` (QA-6). Postgres
+        # aborts the current transaction on a failed statement, so roll
+        # back before this session is used for anything else (aggregate_health
+        # runs further queries on the same session).
+        session.rollback()
+        applied = None
 
     try:
         config = Config(alembic_ini_path)
@@ -247,27 +259,125 @@ def previous_release(session: Session) -> dict[str, Any] | None:
     }
 
 
+def _application_liveness() -> str:
+    """A lightweight in-process liveness signal for `aggregate_health`
+    (QA-8): this function running at all proves the process's import
+    graph and settings came up, which a crash-looping container never
+    gets to. Deliberately *not* the same check as `deploy_health_check`'s
+    `probe_application` below — that one is externally observed (`docker
+    compose exec` into the just-deployed container, run from the `deploy`
+    Compose service, the only one with Docker socket access) and so can
+    actually catch "the container is up but the process inside crashed
+    right after". This one runs from *inside* the process being asked
+    "are you healthy" and so cannot catch that failure mode — it is a
+    weaker signal, used here only because `aggregate_health` is also
+    called from `finops health`/`finance-health.timer`, which run inside
+    the plain `app`/observer context that has no Docker socket access at
+    all. Still strictly better than a literal that could never fail."""
+    try:
+        get_settings()
+    except Exception:  # noqa: BLE001 - any failure here means "not healthy", full stop
+        return "unhealthy"
+    return "healthy"
+
+
+def probe_application(
+    compose_file: str = DEFAULT_COMPOSE_FILE, *, run_compose_fn: Any = _run_compose
+) -> str:
+    """Whether the just-deployed `app` container is actually up and
+    responding (QA-8): execs a trivial command inside it. A
+    stopped/crash-looping/nonexistent container makes `docker compose
+    exec` fail non-zero (`ComposeError`), which this reports as
+    `"unreachable"` rather than the previous hardcoded `"healthy"`
+    literal that no real container state could ever change. Only usable
+    from a context with Docker socket access — the `deploy` Compose
+    service (see `deploy_health_check`), never the long-running `app`
+    service itself."""
+    try:
+        run_compose_fn(compose_file, "exec", "-T", "app", "true")
+    except ComposeError:
+        return "unreachable"
+    return "healthy"
+
+
+def deploy_health_check(
+    session: Session,
+    *,
+    compose_file: str = DEFAULT_COMPOSE_FILE,
+    run_compose_fn: Any = _run_compose,
+) -> dict[str, Any]:
+    """The narrow health gate `finops deploy` uses to decide whether to
+    promote a release to `current` or trigger ADR-008's auto-rollback —
+    checking only things *this deploy* can actually break: is the app
+    container reachable, is the database reachable, are migrations at
+    head. Deliberately does not fold in `aggregate_health`'s broader
+    operational signals (Plaid sync staleness, backup verification) —
+    QA-14: a pre-existing stale sync or unverified backup has nothing to
+    do with whether the release that was *just* deployed is healthy, and
+    conflating the two meant a pre-existing Plaid outage auto-rolled back
+    every subsequent deploy — including the deploy of the fix for that
+    very outage — discarding a known-good release each time (QA-2). See
+    `aggregate_health` for the broader view `finops health`/the health
+    timer use instead."""
+    db = db_status(session)
+    migration = migration_status(session) if db["status"] == "healthy" else {"status": "unknown"}
+    application = probe_application(compose_file, run_compose_fn=run_compose_fn)
+    healthy = (
+        db["status"] == "healthy"
+        and migration["status"] == "up_to_date"
+        and application == "healthy"
+    )
+    return {
+        "overall": "healthy" if healthy else "unhealthy",
+        "database": db["status"],
+        "migrations": migration["status"],
+        "application": application,
+    }
+
+
 def aggregate_health(session: Session, settings: Settings | None = None) -> dict[str, Any]:
     """The single `finops health` view: is the application, database,
     sync, and backup posture all in an expected state? This is the
-    command health checks (deploy verification, `finance-health.timer`,
-    an owner glancing at the system) should reach for first."""
+    command health checks (`finance-health.timer`, an owner glancing at
+    the system) should reach for first. Not what `finops deploy` gates
+    promotion/rollback on — see `deploy_health_check` (QA-14) for that
+    narrower view."""
     settings = settings or get_settings()
     db = db_status(session)
     migration = migration_status(session) if db["status"] == "healthy" else {"status": "unknown"}
-    sync = sync_status(session) if db["status"] == "healthy" else {"status": "unknown"}
-    backup = backup_status(session) if db["status"] == "healthy" else {"status": "unknown"}
-    release = current_release(session) if db["status"] == "healthy" else None
+    # Every other table this function reads lives in a schema migrations
+    # create — querying them against a database that is merely reachable
+    # but not yet migrated (or whose migration state we couldn't
+    # determine) raises `ProgrammingError`/`UndefinedTable` instead of
+    # producing a status (QA-6's failure mode, one level up).
+    schema_ready = db["status"] == "healthy" and migration["status"] not in (
+        "unmigrated",
+        "unreachable",
+    )
+    sync = sync_status(session) if schema_ready else {"status": "unknown"}
+    backup = backup_status(session) if schema_ready else {"status": "unknown"}
+    release = current_release(session) if schema_ready else None
+    application = _application_liveness()
 
     unhealthy_conditions = [
         db["status"] != "healthy",
         migration["status"] not in ("up_to_date",),
         sync["status"] in ("error", "stale"),
+        # QA-7: a permanently broken backup pipeline previously never
+        # surfaced here, so it never generated an ops.errors row via
+        # finance-health.timer either. "unverified" means a backup and/or
+        # its restore-verification actually ran and did not succeed (or
+        # is stale) -- that's a real regression and must gate overall
+        # health. "never_run" is deliberately excluded: a fresh deploy
+        # before the first daily backup timer fires is not yet unhealthy,
+        # just not yet proven.
+        backup["status"] == "unverified",
+        application != "healthy",
     ]
     overall = "unhealthy" if any(unhealthy_conditions) else "healthy"
 
     return {
-        "application": "healthy",  # process is running to answer this at all
+        "application": application,
         "database": db["status"],
         "migrations": migration["status"],
         "sync": sync["status"],

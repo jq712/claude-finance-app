@@ -17,7 +17,7 @@ code defect.
 import shutil
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from finance_app.config.settings import Settings
 from finance_app.ops.backup import (
@@ -38,6 +38,25 @@ _MISSING_TOOLS = [tool for tool in ("pg_dump", "pg_restore", "gpg") if shutil.wh
 def _require_backup_tools():
     if _MISSING_TOOLS:
         pytest.skip(f"missing required binaries on PATH: {', '.join(_MISSING_TOOLS)}")
+
+
+@pytest.fixture(autouse=True)
+def _clean_backup_runs():
+    """Most tests below call `create_backup` without ever verifying the
+    result, deliberately (that's what a *different* test exercises) —
+    left in place, that row is the most recent `ops.backup_runs` entry
+    and makes `status.backup_status`/`aggregate_health` report
+    `"unverified"` for every other test/command sharing this database
+    (e.g. `tests/integration/test_finops_cli.py`'s `finops health` check)
+    until something else happens to clean it up. Isolate this file's own
+    rows instead of leaking them."""
+    engine = create_engine(role_dsn("finance_app"))
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM ops.backup_runs"))
+    yield
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM ops.backup_runs"))
+    engine.dispose()
 
 
 @pytest.fixture

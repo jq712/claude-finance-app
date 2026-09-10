@@ -39,12 +39,15 @@ This is not a `finops` one-liner on purpose — it is the one operation in this 
    sudo systemctl stop finance-app.service
    ```
 2. Confirm which backup you're restoring and why (`finops backup-status`, and the incident record if this follows an incident).
-3. Restore directly into the running `postgres` service's `finance` database — the one case where the target is *not* a scratch database:
+3. Restore directly into the running `postgres` service's `finance` database — the one case where the target is *not* a scratch database. Set `$TARGET_DATABASE_URL` rather than passing it positionally — a positional argument lands in shell history the moment it's typed (finding 2):
    ```
-   deploy/scripts/with-production-env.sh deploy/scripts/restore.sh <backup-path> \
-       "postgresql+psycopg://finance_migrator:<finance_migrator password>@postgres:5432/finance"
+   read -rs -p "finance_migrator password: " FINANCE_MIGRATOR_DB_PASSWORD; echo
+   export TARGET_DATABASE_URL="postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD}@postgres:5432/finance"
+   unset FINANCE_MIGRATOR_DB_PASSWORD
+   deploy/scripts/with-production-env.sh deploy/scripts/restore.sh <backup-path> "" <backup-run-id>
+   unset TARGET_DATABASE_URL
    ```
-   (Read the password from the same place `with-production-env.sh` would export it, or run this restore through a similarly credentialed invocation — do not type it in plaintext on the command line where shell history would capture it; prefer piping it in or running interactively with the variable already exported by the wrapper.)
+   (`<backup-run-id>` — from `docker compose ... run --rm app python -m finance_app.ops.backup latest` or `finops backup-status` — is optional but strongly recommended here: it verifies the artifact's recorded sha256 before decrypting, the one channel that would otherwise let a substituted or corrupted-in-place backup silently restore over production.)
 4. Run the sanity checks (previous section) against the now-restored `finance` database.
 5. Confirm `finops migration-status` reports `up_to_date` — a backup taken before a since-applied migration will need `alembic upgrade head` run afterward.
 6. Restart the application:

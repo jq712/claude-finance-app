@@ -41,7 +41,7 @@ def test_core_tables_exist_in_expected_schemas(migrator_engine) -> None:
 def test_alembic_is_at_a_known_head(migrator_engine) -> None:
     with migrator_engine.connect() as conn:
         version = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-    assert version == "b2518380bc18"
+    assert version == "a1c3e9f4d2b7"
 
 
 def test_migrator_dsn_matches_the_role_that_ran_migrations() -> None:

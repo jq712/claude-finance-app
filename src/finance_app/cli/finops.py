@@ -27,6 +27,7 @@ import re
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from finance_app.config.settings import get_settings
 from finance_app.db.models.ops import Release
@@ -46,8 +47,25 @@ console = Console()
 
 _RELEASE_ID_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
+# `recent-errors --limit` is user/agent-supplied and forwarded straight
+# into a SQL LIMIT (QA-13) — bound it to a sane range so an out-of-range
+# value is a clear usage error (exit 2) instead of an unhandled
+# sqlalchemy.exc.DataError traceback.
+_MAX_RECENT_ERRORS_LIMIT = 10_000
+
 
 def _emit(data: dict | list, *, as_json: bool, title: str) -> None:
+    """Renders `data` as a Rich table for interactive use (or raw JSON for
+    `--json`). Every non-JSON value is wrapped in `rich.text.Text` rather
+    than interpolated into an f-string Rich then parses as markup (QA-12)
+    — `data` frequently carries strings sourced from the database
+    (`ops.errors.message`, merchant/error text embedded in it), and per
+    CLAUDE.md every such string is attacker-influenceable. Unescaped, a
+    message containing `[red]...[/red]` silently restyles the operator's
+    terminal, and an unmatched closing tag like `[/not-a-tag]` raises
+    `rich.errors.MarkupError` and crashes the exact command an operator
+    reaches for during an incident. `Text` is never interpreted as
+    markup, so both cases render as inert literal text instead."""
     if as_json:
         print(json.dumps(data, default=str))  # noqa: T201 - machine-readable stdout, not logging
         return
@@ -59,14 +77,14 @@ def _emit(data: dict | list, *, as_json: bool, title: str) -> None:
         for key in data[0]:
             table.add_column(key)
         for row in data:
-            table.add_row(*(str(v) for v in row.values()))
+            table.add_row(*(Text(str(v)) for v in row.values()))
         console.print(table)
         return
     table = Table(title=title)
     table.add_column("field")
     table.add_column("value")
     for key, value in data.items():
-        table.add_row(key, str(value))
+        table.add_row(key, Text(str(value)))
     console.print(table)
 
 
@@ -144,6 +162,11 @@ def recent_errors_cmd(
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Recent sanitized `ops.errors` rows — never a financial payload."""
+    if limit < 1 or limit > _MAX_RECENT_ERRORS_LIMIT:
+        console.print(
+            f"[red]--limit must be between 1 and {_MAX_RECENT_ERRORS_LIMIT}, got {limit}[/red]"
+        )
+        raise typer.Exit(2)
     with observer_session_scope() as session:
         result = status.recent_errors(session, limit=limit)
     _emit(result, as_json=json_output, title="recent-errors")
@@ -173,13 +196,21 @@ def deploy(
 ) -> None:
     """Deploy an image already published to the registry, by Git SHA.
 
-    Sequence (ADR-008): pull the tagged image, bring the stack up under
-    that tag, verify health, and record the release as `current` — or, on
-    a failed health check, automatically roll back to the previous known-
-    good release and record this attempt as `failed`. Run this on the VPS
-    after CI has published `<container_image_repo>:<release_id>` to GHCR
-    and the production-deploy approval gate has passed
-    (docs/deployment.md)."""
+    Sequence (ADR-008): pull the tagged image, run pending migrations as
+    an explicit preflight step (ADR-008's "migration preflight" — nothing
+    in this path used to actually run `alembic upgrade head` against the
+    new image, so a deploy that needed a migration would come up against
+    a stale schema), bring the stack up under that tag, verify health via
+    `deploy_health_check` (deliberately narrower than `finops health`'s
+    `aggregate_health` — see that function's docstring, QA-14: a
+    pre-existing Plaid outage or unverified backup has nothing to do with
+    whether *this* deploy is healthy, and conflating the two used to
+    auto-rollback every deploy during an unrelated outage), and record
+    the release as `current` — or, on a failed health check, automatically
+    roll back to the previous known-good release and record this attempt
+    as `failed`. Run this on the VPS after CI has published
+    `<container_image_repo>:<release_id>` to GHCR and the
+    production-deploy approval gate has passed (docs/deployment.md)."""
     if not _RELEASE_ID_RE.match(release_id):
         console.print(f"[red]not a valid release id (expected a Git SHA):[/red] {release_id}")
         raise typer.Exit(2)
@@ -194,6 +225,7 @@ def deploy(
 
     try:
         run_compose(compose_file, "pull", "app", env=env)
+        run_compose(compose_file, "run", "--rm", "-T", "app", "alembic", "upgrade", "head", env=env)
         run_compose(compose_file, "up", "-d", "app", env=env)
     except ComposeError as exc:
         with session_scope() as session:
@@ -204,7 +236,9 @@ def deploy(
         raise typer.Exit(1) from exc
 
     with observer_session_scope() as obs_session:
-        health = status.aggregate_health(obs_session, settings)
+        health = status.deploy_health_check(
+            obs_session, compose_file=compose_file, run_compose_fn=run_compose
+        )
 
     with session_scope() as session:
         release = session.get(Release, release_row_id)

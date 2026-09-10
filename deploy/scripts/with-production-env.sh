@@ -8,17 +8,39 @@
 #
 # Relies on $CREDENTIALS_DIRECTORY, which systemd sets automatically for
 # any unit using LoadCredential=/LoadCredentialEncrypted= (see
-# systemd.exec(5)). Run outside such a unit (e.g. by hand for debugging),
-# this script simply execs its arguments with nothing exported — every
-# `export_credential` call below is a no-op when the directory or the
-# specific credential file isn't present, so partial credential sets
-# (e.g. finance-sync.service doesn't load backup_encryption_key) are
-# expected, not an error.
+# systemd.exec(5)) — so this script only ever runs correctly *inside* one
+# of those units. Run any other way (an interactive shell, a cron job, a
+# plain SSH session) it used to silently exec its arguments with nothing
+# exported, which meant `deploy/compose.yaml`'s `${VAR:?required}`
+# interpolation failed with a confusing "variable is required" error
+# instead of the real problem: this wrapper wasn't run under systemd at
+# all. It now refuses to proceed instead — see the error message below
+# for the correct invocation.
 #
 # Never echoes a credential value. Never writes one to a file other than
 # exporting it into this process's environment, which only this process
 # and its exec'd child inherit.
 set -eu
+
+if [ -z "${CREDENTIALS_DIRECTORY:-}" ]; then
+    echo "with-production-env.sh: \$CREDENTIALS_DIRECTORY is not set." >&2
+    echo "" >&2
+    echo "This script only decrypts production credentials inside a systemd unit" >&2
+    echo "using LoadCredentialEncrypted= (systemd.exec(5)) — a bare interactive" >&2
+    echo "shell has no route to the TPM/machine-key-bound decryption systemd-creds" >&2
+    echo "relies on. Run it via 'systemd-run' instead, e.g. for finops:" >&2
+    echo "" >&2
+    echo "  sudo systemd-run --pty --wait --collect --same-dir \\" >&2
+    echo "    \$(sed -n 's/^LoadCredentialEncrypted=/--property=LoadCredentialEncrypted=/p' \\" >&2
+    echo "        /etc/systemd/system/finance-app.service) \\" >&2
+    echo "    -- /opt/finance-app/deploy/scripts/with-production-env.sh \\" >&2
+    echo "       /opt/finance-app/deploy/scripts/finops.sh deploy <sha>" >&2
+    echo "" >&2
+    echo "See docs/runbooks/deploy.md for the full, copy-pasteable command per" >&2
+    echo "operation (deploy/rollback/restart). Refusing to exec '$*' with an" >&2
+    echo "empty credential set rather than silently proceeding without them." >&2
+    exit 1
+fi
 
 export_credential() {
     name="$1"
