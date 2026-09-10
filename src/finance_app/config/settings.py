@@ -31,6 +31,15 @@ class Settings(BaseSettings):
         "postgresql+psycopg://finance_agent:devpassword@localhost:5433/finance_dev"
     )
 
+    # `finops`'s own connection (handoff §10): sanitized, read-only
+    # operational data only — ops.* plus the narrow plaid.items/sync_state
+    # grants added in migrations/versions/0004. Deliberately never
+    # database_url/finance_app: finops diagnoses production, it does not
+    # get application write authority. See docs/security-model.md.
+    observer_database_url: str = (
+        "postgresql+psycopg://finance_observer:devpassword@localhost:5433/finance_dev"
+    )
+
     plaid_env: str = "sandbox"
     plaid_client_id: str = ""
     plaid_secret: SecretStr = SecretStr("")
@@ -46,6 +55,34 @@ class Settings(BaseSettings):
     openai_model: str = ""
     anthropic_api_key: SecretStr = SecretStr("")
     anthropic_model: str = ""
+
+    # --- Backups (Milestone 7, ADR-015) --------------------------------
+    # `finance_backup` is read-only everywhere (migrations/versions/0002),
+    # so pg_dump always runs as this role, never as finance_app/finance_owner.
+    backup_database_url: str = (
+        "postgresql+psycopg://finance_backup:devpassword@localhost:5433/finance_dev"
+    )
+    # Passphrase for symmetric GPG encryption of backup archives before they
+    # leave the VPS (ADR-015). Production value is a systemd encrypted
+    # credential; dev/CI use a synthetic value and never a real secret.
+    backup_encryption_key: SecretStr = SecretStr("")
+    # Directory backups/restores are staged in. In production this is a
+    # host-mounted volume the backup timer writes to; off-machine transfer
+    # of that directory's contents is an owner-performed operational step
+    # documented in docs/backups.md (deliberately not automated here — see
+    # that doc for why).
+    backup_dir: str = "./backups"
+
+    # --- Release identity (Milestone 7, ADR-008) ------------------------
+    # The immutable Git SHA this running container was built from. Set by
+    # `deploy/compose.yaml` from the image tag; empty means "not running
+    # from a release image" (e.g. local dev), in which case `finops
+    # version`/health reporting falls back to __version__.
+    release_id: str = ""
+    # `ghcr.io/<owner>/<repo>` — CI publishes `container_image_repo:<sha>`
+    # (.github/workflows/ci.yml); `finops deploy`/`rollback` build the full
+    # image ref from this plus a release id.
+    container_image_repo: str = "ghcr.io/jq712/claude-finance-app"
 
     log_level: str = "INFO"
     log_format: str = "json"

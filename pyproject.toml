@@ -43,6 +43,11 @@ dev = [
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# `claude-code/` (added by PRs #10/#11) is a read-only archival copy of
+# repo-root docs/scripts for judge review, not live source this project's
+# lint rules govern — `pyright`'s `include` below already excludes it the
+# same way.
+extend-exclude = ["claude-code"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
