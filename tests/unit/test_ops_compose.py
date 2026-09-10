@@ -35,7 +35,13 @@ def test_run_compose_invokes_the_runner_with_the_built_command() -> None:
     assert len(calls) == 1
     command, kwargs = calls[0]
     assert command == ["docker", "compose", "-f", "deploy/compose.yaml", "restart", "app"]
-    assert kwargs["env"] == {"RELEASE_ID": "abc123"}
+    # `env` is merged onto the parent process environment, not substituted
+    # for it (QA-1 regression, tests/unit/test_ops_compose_env_regression.py)
+    # — the deploy-specific overlay must be present, but so must everything
+    # else the parent process already had (PATH, credentials exported by
+    # deploy/scripts/with-production-env.sh, ...).
+    assert kwargs["env"]["RELEASE_ID"] == "abc123"
+    assert "PATH" in kwargs["env"]
 
 
 def test_run_compose_wraps_a_nonzero_exit_as_compose_error() -> None:

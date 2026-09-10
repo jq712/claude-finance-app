@@ -16,6 +16,7 @@ called with instead of executing anything.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 
@@ -41,9 +42,18 @@ def run_compose(
     env: dict[str, str] | None = None,
     runner: Runner = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
+    """`env` is *merged onto* the current process environment, never
+    substituted for it (QA-1 — the previous behavior passed `env` straight
+    to `subprocess.run`, which replaces the child's entire environment,
+    dropping `PATH`/`HOME`/every `${VAR:?required}` `deploy/compose.yaml`
+    needs to interpolate). Callers pass only the deploy-specific overlay
+    (e.g. `{"RELEASE_ID": release_id}`); the credentials
+    `deploy/scripts/with-production-env.sh` exported into this process's
+    environment survive into the child unchanged."""
     command = compose_command(compose_file, *args)
+    merged_env = {**os.environ, **(env or {})}
     try:
-        return runner(command, env=env, text=True, capture_output=True, check=True)
+        return runner(command, env=merged_env, text=True, capture_output=True, check=True)
     except subprocess.CalledProcessError as exc:
         raise ComposeError(
             f"{' '.join(command)} failed (exit {exc.returncode}): {exc.stderr[:500]}"

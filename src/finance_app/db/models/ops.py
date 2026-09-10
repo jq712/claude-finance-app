@@ -104,7 +104,7 @@ class Release(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     release_id: Mapped[str] = mapped_column(String(64))  # immutable Git SHA
     image_ref: Mapped[str] = mapped_column(String(512))
-    # "deploying" | "current" | "previous" | "failed" | "rolled_back"
+    # "pending" | "current" | "previous" | "history" | "failed" | "rolled_back"
     status: Mapped[str] = mapped_column(String(32))
     deployed_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -112,3 +112,8 @@ class Release(Base):
     health_check_status: Mapped[str | None] = mapped_column(String(32))
     rolled_back_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(String(2000))
+    # The release_id that was `current` at the moment this deploy attempt
+    # started (captured by `start_deploy`, QA-2) — lets a failed deploy's
+    # auto-rollback target the release it actually replaced instead of
+    # inferring it after the fact from generic status bookkeeping.
+    replaces_release_id: Mapped[str | None] = mapped_column(String(64))

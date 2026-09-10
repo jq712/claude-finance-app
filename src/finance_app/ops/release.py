@@ -7,27 +7,54 @@ commands call into this module for state and separately shell out to
 transitions here stay unit-testable without a real container runtime.
 
 Model, per ADR-008 ("track both current and previous known-good release
-so rollback is one command"):
+so rollback is one command"), enforced by `migrations/versions/
+0005_..._release_rollback_safety.py`'s partial unique index (QA-3 —
+`ops.releases (status) WHERE status IN ('current', 'previous')`):
 
     at most one row with status == "current"
     at most one row with status == "previous"
-    any number of "failed" / "rolled_back" rows (history)
+    any number of "failed" / "rolled_back" / "history" rows (history)
 
 `start_deploy` -> `mark_healthy` is the success path. `start_deploy` ->
 `mark_failed` is the auto-rollback trigger path (handoff §14 step 12,
 ADR-008's "post-deploy health checks trigger automatic rollback").
-`rollback` promotes the tracked previous release back to current without
-needing a new image build or registry fetch.
+`mark_failed` deliberately never touches the current/previous rows: a
+failed deploy attempt was never promoted, so whatever was `current`
+before it started is still the release actually running. `rollback`
+promotes the correct rollback target back to `current` without needing a
+new image build or registry fetch — see `get_previous`'s docstring for
+exactly how that target is resolved (QA-2).
+
+Concurrency (QA-3): `mark_healthy` takes a non-blocking Postgres advisory
+transaction lock (`pg_try_advisory_xact_lock`) before promoting a release
+to `current`. `finops deploy` never holds a single DB transaction across
+the real `docker compose pull/up` step (that would hold the lock for
+however long an image pull takes), so this is a best-effort guard for the
+genuinely dangerous window — two `mark_healthy` calls racing to decide who
+becomes `current` — backed by the partial unique index as the actual
+invariant enforcement.
 """
 
 from __future__ import annotations
 
 import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from finance_app.db.models.ops import Release
+
+# Arbitrary, stable key for the single "who gets to promote a release to
+# current" lock — there is exactly one production deploy target, so one
+# fixed key is sufficient (no need to derive one per release/environment).
+_DEPLOY_PROMOTION_LOCK_KEY = 771_100_501
+
+# A deploy attempt left `pending` longer than this is certainly orphaned
+# (QA-4) — a real deploy resolves to `current`/`failed` within a couple of
+# minutes at most. Reaped as `failed` the next time a deploy starts, so a
+# crashed `finops deploy` never leaves a permanently stuck row that a
+# later rollback could mistake for something to preserve.
+_STALE_PENDING_DEPLOY_MINUTES = 15
 
 
 class NoPreviousReleaseError(RuntimeError):
@@ -39,7 +66,26 @@ class NoPreviousReleaseError(RuntimeError):
 def get_current(session: Session) -> Release | None:
     return (
         session.execute(
-            select(Release).where(Release.status == "current").order_by(Release.deployed_at.desc())
+            select(Release)
+            .where(Release.status == "current")
+            .order_by(Release.deployed_at.desc(), Release.id.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _tracked_previous(session: Session) -> Release | None:
+    """The raw `status == 'previous'` bookkeeping row, if any. Used
+    internally by `mark_healthy`'s history cascade. Not the same thing as
+    the public `get_previous`, which additionally resolves what a
+    rollback should target after a failed deploy attempt — see that
+    function's docstring."""
+    return (
+        session.execute(
+            select(Release)
+            .where(Release.status == "previous")
+            .order_by(Release.deployed_at.desc(), Release.id.desc())
         )
         .scalars()
         .first()
@@ -47,12 +93,54 @@ def get_current(session: Session) -> Release | None:
 
 
 def get_previous(session: Session) -> Release | None:
-    return (
-        session.execute(
-            select(Release).where(Release.status == "previous").order_by(Release.deployed_at.desc())
-        )
+    """The release a rollback right now should target (ADR-008).
+
+    Two cases collapse into this one function:
+
+    - The most recent deploy attempt is healthy/`current`: the rollback
+      target is the tracked `previous` release — plain bookkeeping,
+      populated by `mark_healthy`.
+    - The most recent deploy attempt `failed`: `mark_failed` never
+      touches current/previous (see its docstring), so whatever is
+      tracked as `current` right now is still the release that is
+      actually running, whether or not the failed attempt's own
+      container ever started — an operator or the deploy auto-rollback
+      needs to redeploy *that* image, not skip past it to something
+      older (QA-2). If that `current` release has no deploy history of
+      its own (`replaces_release_id is None` — it was the very first
+      release ever deployed), there genuinely is nothing to fall back
+      to, and this returns `None`.
+    """
+    latest = (
+        session.execute(select(Release).order_by(Release.deployed_at.desc(), Release.id.desc()))
         .scalars()
         .first()
+    )
+    if latest is not None and latest.status == "failed":
+        current = get_current(session)
+        if current is not None and current.replaces_release_id is not None:
+            return current
+        return None
+    return _tracked_previous(session)
+
+
+def _reap_stale_pending_deploys(session: Session) -> None:
+    """A deploy killed between `start_deploy` and `mark_healthy`/
+    `mark_failed` leaves its row stuck `pending` with nothing to ever
+    resolve it (QA-4). Since a real deploy resolves within minutes, any
+    `pending` row older than `_STALE_PENDING_DEPLOY_MINUTES` is certainly
+    orphaned from a crashed process — reap it as `failed` so it stops
+    silently occupying the deploy-in-progress state and a later rollback
+    never mistakes it for something to preserve."""
+    session.execute(
+        text(
+            "UPDATE ops.releases SET status = 'failed', "
+            "health_check_status = 'unhealthy', "
+            "notes = 'reaped: orphaned pending deploy attempt (process likely crashed)' "
+            "WHERE status = 'pending' "
+            "AND deployed_at < now() - make_interval(mins => :minutes)"
+        ),
+        {"minutes": _STALE_PENDING_DEPLOY_MINUTES},
     )
 
 
@@ -61,24 +149,76 @@ def start_deploy(session: Session, *, release_id: str, image_ref: str) -> Releas
     previous rows yet — that only happens once the new release is
     confirmed healthy (`mark_healthy`) or confirmed failed (`mark_failed`),
     so a crash mid-deploy never leaves the tracked state pointing at a
-    release that was never actually verified."""
-    release = Release(release_id=release_id, image_ref=image_ref, status="deploying")
+    release that was never actually verified.
+
+    Captures `replaces_release_id` — whatever is `current` right now —
+    so a later failed-deploy rollback can target it directly (QA-2)."""
+    _reap_stale_pending_deploys(session)
+    replaces = get_current(session)
+    release = Release(
+        release_id=release_id,
+        image_ref=image_ref,
+        status="pending",
+        replaces_release_id=replaces.release_id if replaces is not None else None,
+    )
     session.add(release)
     session.flush()
     return release
+
+
+def _try_acquire_promotion_lock(session: Session) -> bool:
+    return bool(
+        session.execute(
+            text("SELECT pg_try_advisory_xact_lock(:key)"),
+            {"key": _DEPLOY_PROMOTION_LOCK_KEY},
+        ).scalar()
+    )
 
 
 def mark_healthy(session: Session, release: Release) -> None:
     """Promote `release` to current. The prior current release (if any)
     becomes the tracked previous release; whatever was previous before
     that is left as plain history — ADR-008 only requires *one* rollback
-    step to be trivial, not an arbitrary-depth undo stack."""
+    step to be trivial, not an arbitrary-depth undo stack.
+
+    Redeploying the SHA that is already current (an idempotent retry) is
+    handled specially (QA-5): the old `current` row becomes `history`
+    directly rather than `previous`, so `previous` never ends up holding
+    the same `release_id` as `current` — which would make `finops
+    rollback` a silent no-op that redeploys the identical image.
+
+    Concurrency (QA-3): if another `mark_healthy` call is concurrently
+    promoting a release (holds the deploy-promotion advisory lock), this
+    call does not attempt to become `current` too — it records itself as
+    `failed` instead. Its own image was never actually the one promoted,
+    so that is an accurate outcome, not just a defensive one."""
+    if not _try_acquire_promotion_lock(session):
+        release.status = "failed"
+        release.health_check_status = "unhealthy"
+        release.notes = "concurrent deploy detected while promoting to current"
+        return
+
     old_current = get_current(session)
-    old_previous = get_previous(session)
-    if old_previous is not None and old_previous.id != (old_current.id if old_current else None):
-        old_previous.status = "history"
-    if old_current is not None:
-        old_current.status = "previous"
+    old_previous = _tracked_previous(session)
+    same_sha_redeploy = old_current is not None and old_current.release_id == release.release_id
+
+    if same_sha_redeploy:
+        assert old_current is not None
+        old_current.status = "history"
+    else:
+        if old_previous is not None and (old_current is None or old_previous.id != old_current.id):
+            old_previous.status = "history"
+        if old_current is not None:
+            old_current.status = "previous"
+
+    # Flush the demotion(s) before promoting `release` to `current`: the
+    # partial unique index (migrations/versions/0005) is a plain index,
+    # not a deferrable constraint (Postgres has no deferrable *partial*
+    # unique constraint), so it is checked per-statement — the old
+    # `current` row must already be demoted, in the database, before this
+    # transaction's own UPDATE tries to give a second row `status =
+    # 'current'`.
+    session.flush()
     release.status = "current"
     release.health_check_status = "healthy"
 
@@ -90,15 +230,32 @@ def mark_failed(session: Session, release: Release, *, reason: str) -> None:
 
 
 def rollback(session: Session) -> Release:
-    """Promote the tracked previous release back to current; demote and
-    mark the (unhealthy) current release `rolled_back`. Raises
-    `NoPreviousReleaseError` if there is nothing to roll back to."""
-    previous = get_previous(session)
-    if previous is None:
+    """Promote the release `get_previous` resolves as the rollback target
+    back to `current`.
+
+    If that target is already `current` (QA-2's failed-deploy case —
+    `mark_failed` never demoted it in the first place), this is a no-op
+    at the bookkeeping level: nothing to promote or demote, it's already
+    the right release. The caller (`_do_rollback` in `cli.finops`) still
+    needs to redeploy its image via `docker compose up`, since the failed
+    attempt's container may already be running. Otherwise (a plain
+    healthy-to-healthy rollback), the current release is demoted and
+    marked `rolled_back` and the target is promoted, as before.
+
+    Raises `NoPreviousReleaseError` if there is nothing to roll back to.
+    """
+    target = get_previous(session)
+    if target is None:
         raise NoPreviousReleaseError("No previous known-good release is tracked.")
     current = get_current(session)
+    if current is not None and current.id == target.id:
+        return target
     if current is not None:
         current.status = "rolled_back"
         current.rolled_back_at = datetime.datetime.now(datetime.UTC)
-    previous.status = "current"
-    return previous
+        # Same ordering reason as `mark_healthy`: demote before promoting,
+        # in separate statements, so the partial unique index never sees
+        # two `current` rows even transiently.
+        session.flush()
+    target.status = "current"
+    return target
