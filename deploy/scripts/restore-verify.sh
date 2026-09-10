@@ -28,7 +28,7 @@ trap cleanup EXIT INT TERM
 # `if` gets a chance to run its own error message (QA-18) — the explicit
 # `if ! LATEST=...` form checks the exit code directly instead of relying
 # on -e to short-circuit the whole script with no explanation.
-if ! LATEST="$(docker compose -f "$COMPOSE_FILE" run --rm -T app python -m finance_app.ops.backup latest)"; then
+if ! LATEST="$(docker compose -f "$COMPOSE_FILE" --profile backup run --rm -T backup python -m finance_app.ops.backup latest)"; then
     echo "restore-verify: no successful backup found to verify" >&2
     exit 1
 fi
@@ -79,9 +79,9 @@ TARGET_URL="postgresql+psycopg://finance_migrator:${SCRATCH_PASSWORD}@${SCRATCH_
 # `finance_app.ops.backup`'s own pg_dump/pg_restore calls (the ones that
 # matter — finding 2) no longer put any password on argv regardless of
 # how this target URL was obtained.
-docker compose -f "$COMPOSE_FILE" run --rm -T app \
+docker compose -f "$COMPOSE_FILE" --profile backup run --rm -T backup \
     python -m finance_app.ops.backup restore "$BACKUP_PATH" --target-url "$TARGET_URL" \
         --backup-run-id "$BACKUP_RUN_ID"
 
-docker compose -f "$COMPOSE_FILE" run --rm -T app \
+docker compose -f "$COMPOSE_FILE" --profile backup run --rm -T backup \
     python -m finance_app.ops.backup verify "$BACKUP_RUN_ID" --target-url "$TARGET_URL"

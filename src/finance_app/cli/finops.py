@@ -225,7 +225,11 @@ def deploy(
 
     try:
         run_compose(compose_file, "pull", "app", env=env)
-        run_compose(compose_file, "run", "--rm", "-T", "app", "alembic", "upgrade", "head", env=env)
+        # Migrations run via the narrowly-scoped `migrate` service
+        # (finance_migrator only — full DDL authority the long-running
+        # `app` service must never hold, finding 1), not by overloading
+        # `app`'s own definition for a one-shot job.
+        run_compose(compose_file, "--profile", "migrate", "run", "--rm", "-T", "migrate", env=env)
         run_compose(compose_file, "up", "-d", "app", env=env)
     except ComposeError as exc:
         with session_scope() as session:

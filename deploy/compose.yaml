@@ -1,13 +1,50 @@
 # Production topology (handoff §20, §29 Milestone 7; ADR-008, ADR-011).
 #
-#   app        the finance-app image — `finance`/`finops` entrypoints,
-#              plus the Plaid sync/backup/health jobs invoked by
-#              deploy/systemd/ timers via `docker compose run --rm app ...`
+#   app        the finance-app image, kept long-running — `finance status`/
+#              interactive `finance chat`. Deliberately the least-
+#              privileged service here: it is the one that processes
+#              attacker-influenceable input (Plaid transaction/merchant
+#              text, runtime-agent model responses), so it gets only
+#              DATABASE_URL/AGENT_DATABASE_URL and the active provider
+#              key — never migrator, observer, or backup credentials, and
+#              never Plaid API credentials (those belong to `sync` only).
 #   postgres   PostgreSQL 17, matching the pinned pg_dump/pg_restore client
 #              baked into the app image (Dockerfile)
+#   migrate    one-shot `alembic upgrade head`, `finance_migrator`-only.
+#   sync       one-shot `finance sync` (the daily Plaid transaction sync),
+#              `finance_app` + Plaid API credentials only.
+#   backup     one-shot `python -m finance_app.ops.backup ...`
+#              (backup/restore/verify), `finance_backup` (dump role) +
+#              `finance_app` (bookkeeping writes) + the GPG passphrase —
+#              never Plaid/model credentials, never migrator/observer.
+#   finops     one-shot read-only `finops <cmd>` (health/version/*-status/
+#              recent-errors), `finance_observer` only — no Docker socket.
+#   deploy     `finops deploy`/`rollback`/`restart` — the *one* service
+#              with Docker socket access, deliberately kept separate from
+#              every service above (see that service's own comment).
 #   caddy      reverse proxy for the future Plaid webhook endpoint
 #              (Milestone 8) — not started by default, see the `webhook`
 #              profile below and deploy/caddy/Caddyfile
+#
+# `migrate`/`sync`/`backup`/`finops` all run behind Compose profiles
+# (never started by a bare `docker compose up`) and share the `app`
+# image — same build, same code, different environment blocks. Splitting
+# these out (rather than overloading the long-running `app` service's
+# definition for `docker compose run --rm app ...` one-shot jobs, as a
+# prior version of this file did) is what makes "the container that
+# processes Plaid/LLM responses never holds finance_migrator/
+# finance_backup credentials or the backup encryption key" actually true
+# at the container level, not just at the systemd-credential level.
+# `docker compose` parses and interpolates every `${VAR:?required}` in
+# this entire file before running *any* single service, regardless of
+# `--profile` — so this split does not reduce which credentials a given
+# systemd unit's `LoadCredentialEncrypted=` list must provide (they all
+# still need to provide everything, or compose refuses to parse the file
+# at all); what it changes is which of those credentials actually reach
+# a given container's `environment:` (and so its `docker inspect` output)
+# once compose has been invoked. See QA-1's regression test docstring
+# (tests/unit/test_ops_compose_env_regression.py) for the same
+# whole-file-interpolation behavior in a different context.
 #
 # No secret is ever baked into this file or into the image. Every
 # credential-shaped value below is read from the environment at container
@@ -16,12 +53,12 @@
 # (`LoadCredentialEncrypted=`, ADR-010); in development it comes from a
 # local, gitignored `.env` seeded from `.env.example`.
 #
-# The app container itself never runs long-lived scheduled work — no
-# in-process scheduler (ADR-011). It stays up only to be reachable for
-# `finops restart`/interactive `finance chat`/etc.; sync/backup/health run
-# as one-shot `docker compose run --rm app ...` invocations from systemd
-# timers, sharing this same image and network so they see the same
-# `postgres` service by name.
+# No service in this file runs long-lived scheduled work — no in-process
+# scheduler (ADR-011). `app` stays up only to be reachable for `finops
+# restart`/interactive `finance chat`/etc.; sync/backup/health run as
+# one-shot `docker compose run --rm --profile <name> <name> ...`
+# invocations from systemd timers, sharing this same image and network so
+# they see the same `postgres` service by name.
 services:
   postgres:
     image: postgres:17-alpine
@@ -40,10 +77,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    # No published port: only `app` (and, on the same Docker network,
-    # `docker compose run` one-shot jobs) reach Postgres. The financial
-    # database is never directly reachable from outside the compose
-    # network — see docs/security-model.md.
+    # No published port: only the services below (and, on the same
+    # Docker network, `docker compose run` one-shot jobs) reach Postgres.
+    # The financial database is never directly reachable from outside
+    # the compose network — see docs/security-model.md.
     expose:
       - "5432"
 
@@ -62,48 +99,115 @@ services:
       FINANCE_ENV: production
       RELEASE_ID: ${RELEASE_ID:-}
       DATABASE_URL: postgresql+psycopg://finance_app:${FINANCE_APP_DB_PASSWORD:?FINANCE_APP_DB_PASSWORD is required}@postgres:5432/finance
-      ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD:?FINANCE_MIGRATOR_DB_PASSWORD is required}@postgres:5432/finance
       AGENT_DATABASE_URL: postgresql+psycopg://finance_agent:${FINANCE_AGENT_DB_PASSWORD:?FINANCE_AGENT_DB_PASSWORD is required}@postgres:5432/finance
-      OBSERVER_DATABASE_URL: postgresql+psycopg://finance_observer:${FINANCE_OBSERVER_DB_PASSWORD:?FINANCE_OBSERVER_DB_PASSWORD is required}@postgres:5432/finance
-      BACKUP_DATABASE_URL: postgresql+psycopg://finance_backup:${FINANCE_BACKUP_DB_PASSWORD:?FINANCE_BACKUP_DB_PASSWORD is required}@postgres:5432/finance
-      PLAID_ENV: production
-      PLAID_CLIENT_ID: ${PLAID_CLIENT_ID:?PLAID_CLIENT_ID is required}
-      PLAID_SECRET: ${PLAID_SECRET:?PLAID_SECRET is required}
-      PLAID_ACCESS_TOKEN: ${PLAID_ACCESS_TOKEN:?PLAID_ACCESS_TOKEN is required}
-      PLAID_WEBHOOK_SECRET: ${PLAID_WEBHOOK_SECRET:-}
       AGENT_PROVIDER: ${AGENT_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+    # No published port: the CLI/chat surface is used via `docker compose
+    # exec`, over SSH to the host — never exposed to the network (handoff
+    # §5). Only Milestone 8's webhook endpoint, behind `caddy`, will ever
+    # be publicly reachable.
+    expose: []
+    # Keep the container up for `docker compose exec`/interactive use;
+    # sync/backup/migrate/finops run as separate one-shot profiled
+    # services below, not inside this long-lived process.
+    command: ["finance", "status"]
+
+  migrate:
+    # One-shot `alembic upgrade head` — the migration-preflight step
+    # `finops deploy` runs before bringing `app` up under a new image
+    # (docs/deployment.md, ADR-008). `finance_migrator` only: full DDL
+    # authority the long-running `app` service must never hold.
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
+    profiles: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD:?FINANCE_MIGRATOR_DB_PASSWORD is required}@postgres:5432/finance
+    command: ["alembic", "upgrade", "head"]
+
+  sync:
+    # One-shot daily Plaid transaction sync (ADR-011, ADR-012). Needs
+    # Plaid API credentials `app` deliberately does not hold — `app`
+    # reads already-synced data from Postgres, it never calls the Plaid
+    # API directly.
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
+    profiles: ["sync"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FINANCE_ENV: production
+      DATABASE_URL: postgresql+psycopg://finance_app:${FINANCE_APP_DB_PASSWORD:?FINANCE_APP_DB_PASSWORD is required}@postgres:5432/finance
+      PLAID_ENV: production
+      PLAID_CLIENT_ID: ${PLAID_CLIENT_ID:?PLAID_CLIENT_ID is required}
+      PLAID_SECRET: ${PLAID_SECRET:?PLAID_SECRET is required}
+      PLAID_ACCESS_TOKEN: ${PLAID_ACCESS_TOKEN:?PLAID_ACCESS_TOKEN is required}
+      PLAID_WEBHOOK_SECRET: ${PLAID_WEBHOOK_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+    command: ["finance", "sync"]
+
+  backup:
+    # One-shot backup/restore/restore-verification (handoff §22,
+    # ADR-015). `finance_backup` (read-only everywhere, for pg_dump) +
+    # `finance_app` (ops.backup_runs bookkeeping writes — finance_backup
+    # cannot write, by design) + the GPG passphrase. Never Plaid/model
+    # credentials, never finance_migrator/finance_observer.
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
+    profiles: ["backup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://finance_app:${FINANCE_APP_DB_PASSWORD:?FINANCE_APP_DB_PASSWORD is required}@postgres:5432/finance
+      BACKUP_DATABASE_URL: postgresql+psycopg://finance_backup:${FINANCE_BACKUP_DB_PASSWORD:?FINANCE_BACKUP_DB_PASSWORD is required}@postgres:5432/finance
       BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
       BACKUP_DIR: /var/lib/finance-app/backups
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: json
     volumes:
       # Backup staging area — matches deploy/systemd/finance-backup.service's
-      # `BindPaths=` mount of the same host directory. Off-machine transfer
-      # of this directory's contents is a separate, owner-performed step
-      # (docs/backups.md); this volume is not itself durable/off-host
-      # storage.
+      # `BindPaths=` mount of the same host directory. Owned by the image's
+      # `finance` user (Dockerfile) so it's actually writable; off-machine
+      # transfer of this directory's contents is a separate, owner-
+      # performed step (docs/backups.md) — this volume is not itself
+      # durable/off-host storage. Only the plaintext staging file (now
+      # `tempfile.mkdtemp()`-based, never written here — see
+      # `ops/backup.py`) previously needed to be avoided; the *encrypted*
+      # artifact belongs here.
       - finance-backups:/var/lib/finance-app/backups
-    # No published port: the CLI/chat/finops surface is used via
-    # `docker compose exec`/`docker compose run`, over SSH to the host —
-    # never exposed to the network (handoff §5). Only Milestone 8's
-    # webhook endpoint, behind `caddy`, will ever be publicly reachable.
-    expose: []
-    # Keep the container up for `docker compose exec`/interactive use;
-    # sync/backup/health run as separate one-shot `run --rm` invocations,
-    # not inside this long-lived process.
-    command: ["finance", "status"]
+
+  finops:
+    # One-shot read-only `finops <cmd>` (health/version/db-status/
+    # migration-status/sync-status/backup-status/recent-errors) —
+    # `finance_observer` only, no Docker socket (unlike `deploy`, which
+    # holds every write `finops` command *and* socket access — read
+    # commands need neither). `finance-health.timer`'s writer path
+    # (`python -m finance_app.ops.health`) is deliberately different: it
+    # writes ops.errors, which finance_observer cannot do, so it runs
+    # via `app` (finance_app-authenticated) instead — see ops/health.py.
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
+    profiles: ["finops"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OBSERVER_DATABASE_URL: postgresql+psycopg://finance_observer:${FINANCE_OBSERVER_DB_PASSWORD:?FINANCE_OBSERVER_DB_PASSWORD is required}@postgres:5432/finance
+      RELEASE_ID: ${RELEASE_ID:-}
 
   # Control-plane container for `finops deploy`/`rollback`/`restart` only
   # (deploy/scripts/finops.sh) — never started by `docker compose up`, only
   # `run --rm --profile deploy deploy finops ...`. This is the *one*
   # service in this file with Docker socket access, deliberately kept
-  # separate from the long-running `app` service, which handles Plaid/
-  # model API calls and interactive `finance chat` and must never be able
-  # to control the Docker daemon. The bind mount below uses the identical
+  # separate from every other service — none of which handles Plaid/model
+  # API calls or interactive `finance chat` *and* controls the Docker
+  # daemon at the same time. The bind mount below uses the identical
   # path on both sides of the mount (a standard docker-outside-of-docker
   # requirement): `docker compose` running inside this container, talking
   # to the host daemon over the socket, resolves relative paths in this
@@ -111,7 +215,12 @@ services:
   # host's — filesystem, so the in-container path has to match the host
   # path for that resolution to land on a real file.
   deploy:
-    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:latest
+    # Pinned by RELEASE_ID like every other service (QA-19/finding 5) —
+    # `:latest` is never the sole identifier for the one service with
+    # Docker socket access either. Falls back to `latest` only for a
+    # first-ever manual bring-up, before any release has been recorded,
+    # same as `app`.
+    image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
     profiles: ["deploy"]
     # The image's default user (uid 1000, "finance") normally can't read
     # /var/run/docker.sock — its host-side group ownership varies by

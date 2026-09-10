@@ -22,6 +22,6 @@ LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credential
 LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
 EnvironmentFile=-/etc/finance-app/env
 
-ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml run --rm -T app finance sync
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml --profile sync run --rm -T sync
 
 TimeoutStartSec=600

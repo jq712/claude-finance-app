@@ -41,10 +41,10 @@ fi
 COMPOSE_FILE="${COMPOSE_FILE:-$(cd "$(dirname "$0")/.." && pwd)/compose.yaml}"
 
 if [ -n "$BACKUP_RUN_ID" ]; then
-    exec docker compose -f "$COMPOSE_FILE" run --rm -T app \
+    exec docker compose -f "$COMPOSE_FILE" --profile backup run --rm -T backup \
         python -m finance_app.ops.backup restore "$BACKUP_PATH" --target-url "$TARGET_URL" \
             --backup-run-id "$BACKUP_RUN_ID"
 fi
 
-exec docker compose -f "$COMPOSE_FILE" run --rm -T app \
+exec docker compose -f "$COMPOSE_FILE" --profile backup run --rm -T backup \
     python -m finance_app.ops.backup restore "$BACKUP_PATH" --target-url "$TARGET_URL"

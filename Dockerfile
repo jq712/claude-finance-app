@@ -82,6 +82,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --gid 1000 finance \
     && useradd --uid 1000 --gid finance --create-home --shell /usr/sbin/nologin finance
 
+# `deploy/compose.yaml`'s `backup` service mounts the `finance-backups`
+# named volume here. Docker initializes a *named* volume's first use from
+# whatever the image already has at that path — owner, group, and mode
+# included — so pre-creating it owned by the `finance` user (uid 1000,
+# the user every service in compose.yaml runs as, `deploy` excepted) here
+# is what makes `pg_dump --file=...`/the encrypted artifact actually
+# writable at runtime. Without this, Docker creates the volume root:root
+# 0755 and every backup run fails at the first write (QA-15).
+RUN install -d -o finance -g finance -m 0700 /var/lib/finance-app/backups
+
 WORKDIR /app
 COPY --from=builder --chown=finance:finance /app /app
 

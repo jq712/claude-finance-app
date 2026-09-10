@@ -224,8 +224,11 @@ jobs:
   migration-preflight:
     # ADR-008: "migrations must be forward-compatible ... or rollback is a
     # lie." Proves the *packaged image* (not just the checked-out source —
-    # integration-tests already covers that) applies cleanly to a fresh
-    # database before anything is deployed anywhere.
+    # integration-tests already covers that) applies cleanly on top of the
+    # schema the *previously published* release actually has, not just a
+    # fresh empty database (finding/QA-17 — a migration that only works
+    # from nothing can still break a real upgrade-in-place; a fresh DB
+    # can't catch that).
     needs: publish-image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -247,11 +250,30 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # HEAD~1 -- the commit main pointed at before this push -- is
+          # this job's proxy for "the release currently in production".
+          # `main` is merge-only per CLAUDE.md's working agreements, so
+          # this is a reasonable approximation without querying anything
+          # ADR-007 would forbid (no read access to the production host).
+          fetch-depth: 2
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: apply the previously-published release's migrations first
+        run: |
+          PREV_SHA="$(git rev-parse HEAD~1)"
+          if docker pull "ghcr.io/${{ github.repository }}:${PREV_SHA}"; then
+            docker run --rm --network host \
+              -e ALEMBIC_DATABASE_URL=postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev \
+              "ghcr.io/${{ github.repository }}:${PREV_SHA}" \
+              alembic upgrade head
+          else
+            echo "no previously-published image for ${PREV_SHA} (e.g. this is the first release on main) -- skipping the previous-schema step, falling through to the fresh-database check below"
+          fi
       - name: alembic upgrade head, from inside the packaged image
         run: |
           docker run --rm --network host \
@@ -299,9 +321,9 @@ jobs:
           until docker compose -f deploy/compose.yaml exec -T postgres pg_isready -U finance_migrator -d finance; do
             sleep 2
           done
-      - run: docker compose -f deploy/compose.yaml run --rm -T app alembic upgrade head
+      - run: docker compose -f deploy/compose.yaml --profile migrate run --rm -T migrate
       - name: finops health (must exit 0)
-        run: docker compose -f deploy/compose.yaml run --rm -T app finops health --json
+        run: docker compose -f deploy/compose.yaml --profile finops run --rm -T finops finops health --json
       - run: docker compose -f deploy/compose.yaml run --rm -T app finance status
       - if: always()
         run: docker compose -f deploy/compose.yaml down -v

@@ -94,10 +94,10 @@ problem).
    `finops deploy` runs inside the narrowly-scoped `deploy` Compose service (Docker socket mounted — see that service's comment in `compose.yaml` for why it's split from the long-running `app` service). It pulls the image, brings the stack up under that tag, runs the health check, and either promotes the release to `current` or automatically rolls back — see `docs/deployment.md`.
 4. Verify:
    ```
-   docker compose -f deploy/compose.yaml run --rm app finops health
-   docker compose -f deploy/compose.yaml run --rm app finops version
+   docker compose -f deploy/compose.yaml --profile finops run --rm finops finops health
+   docker compose -f deploy/compose.yaml --profile finops run --rm finops finops version
    ```
-   (These two are plain reads through `finance_observer` — no socket access needed, so they run in the ordinary `app` service, not `deploy`.)
+   (These two are plain reads through `finance_observer` — no Docker socket access needed, so they run in the dedicated `finops` service, which holds only `OBSERVER_DATABASE_URL` — not `app`, which no longer holds any `finance_observer` credential at all (finding 1), and not `deploy`, which additionally holds Docker socket access these reads don't need.)
 
 ## 4. Normal release (every subsequent deploy)
 
