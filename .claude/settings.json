@@ -11,6 +11,7 @@
       "Read(./.env.production)",
       "Read(./secrets/**)",
       "Read(//etc/finance/**)",
+      "Read(//etc/finance-app/**)",
       "Read(//etc/credstore*/**)",
       "Read(~/.plaid/**)",
       "Bash(ssh:*)",
@@ -21,7 +22,9 @@
       "Bash(git push -f:*)"
     ],
     "ask": [
-      "Bash(docker compose -f deploy/compose.prod.yaml:*)",
+      "Bash(docker compose -f deploy/compose.yaml:*)",
+      "Bash(deploy/scripts/finops.sh:*)",
+      "Bash(deploy/scripts/with-production-env.sh:*)",
       "Bash(alembic downgrade:*)",
       "Bash(uv run alembic downgrade:*)",
       "Bash(gh pr merge:*)",
