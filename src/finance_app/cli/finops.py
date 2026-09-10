@@ -1,6 +1,40 @@
-import typer
+"""`finops` — the narrow production operations interface (handoff §10).
 
-from finance_app import __version__
+Exists specifically so autonomous engineering agents and the owner
+diagnose and operate production through a fixed, auditable, semantic
+command set instead of ad hoc `psql`/shell/SSH. Read commands
+(`health`, `version`, `sync-status`, `db-status`, `migration-status`,
+`backup-status`, `recent-errors`) connect as `finance_observer` — strictly
+read-only, never a financial payload in the output (`ops/db.py`).
+Write commands (`restart`, `deploy`, `rollback`) are the one place this
+CLI is allowed to change production state, and they do so narrowly: a
+`docker compose` operation on the stack already running on the host
+(`ops/compose.py`) plus a bookkeeping row in `ops.releases`
+(`ops/release.py`, via `finance_app` — the only role with write access
+there). None of these commands ever execute arbitrary SQL or shell.
+
+Every command supports `--json` for machine-readable output (evaluated by
+autonomous tooling) alongside the default Rich human-readable rendering
+(read by the owner). See docs/deployment.md for the release/rollback
+sequence these commands implement.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from finance_app.config.settings import get_settings
+from finance_app.db.models.ops import Release
+from finance_app.db.session import session_scope
+from finance_app.ops import release as release_ops
+from finance_app.ops import status
+from finance_app.ops.compose import DEFAULT_COMPOSE_FILE, ComposeError, run_compose
+from finance_app.ops.db import observer_session_scope
 
 app = typer.Typer(
     name="finops",
@@ -8,11 +42,228 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+console = Console()
+
+_RELEASE_ID_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _emit(data: dict | list, *, as_json: bool, title: str) -> None:
+    if as_json:
+        print(json.dumps(data, default=str))  # noqa: T201 - machine-readable stdout, not logging
+        return
+    if isinstance(data, list):
+        if not data:
+            console.print(f"[dim]{title}: none[/dim]")
+            return
+        table = Table(title=title)
+        for key in data[0]:
+            table.add_column(key)
+        for row in data:
+            table.add_row(*(str(v) for v in row.values()))
+        console.print(table)
+        return
+    table = Table(title=title)
+    table.add_column("field")
+    table.add_column("value")
+    for key, value in data.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
 
 @app.command()
-def version() -> None:
-    """Print the application version."""
-    typer.echo(__version__)
+def version(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Print the application version and the running release id."""
+    data = status.version_info()
+    if json_output:
+        print(json.dumps(data))  # noqa: T201
+    else:
+        console.print(f"finance-app [bold]{data['app_version']}[/bold]")
+        console.print(f"release: {data['release_id'] or '(not a release image)'}")
+
+
+@app.command(name="health")
+def health_cmd(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Aggregate application/database/migration/sync/backup health.
+
+    Exits non-zero when unhealthy, so this command is safe to use directly
+    as a scripted health gate (e.g. `finops health || rollback`)."""
+    settings = get_settings()
+    with observer_session_scope() as session:
+        result = status.aggregate_health(session, settings)
+    _emit(result, as_json=json_output, title="health")
+    if result["overall"] != "healthy":
+        raise typer.Exit(1)
+
+
+@app.command(name="sync-status")
+def sync_status_cmd(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Most recent Plaid sync run and cursor state."""
+    with observer_session_scope() as session:
+        result = status.sync_status(session)
+    _emit(result, as_json=json_output, title="sync-status")
+
+
+@app.command(name="db-status")
+def db_status_cmd(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Database reachability."""
+    with observer_session_scope() as session:
+        result = status.db_status(session)
+    _emit(result, as_json=json_output, title="db-status")
+    if result["status"] != "healthy":
+        raise typer.Exit(1)
+
+
+@app.command(name="migration-status")
+def migration_status_cmd(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Compares the database's applied Alembic revision against the
+    repository's head revision."""
+    with observer_session_scope() as session:
+        result = status.migration_status(session)
+    _emit(result, as_json=json_output, title="migration-status")
+    if result["status"] not in ("up_to_date",):
+        raise typer.Exit(1)
+
+
+@app.command(name="backup-status")
+def backup_status_cmd(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Most recent backup and whether it has been restore-verified.
+
+    "verified" requires both a successful backup *and* a successful
+    restore-verification of that specific backup within the freshness
+    window — see docs/backups.md."""
+    with observer_session_scope() as session:
+        result = status.backup_status(session)
+    _emit(result, as_json=json_output, title="backup-status")
+    if result["status"] != "verified":
+        raise typer.Exit(1)
+
+
+@app.command(name="recent-errors")
+def recent_errors_cmd(
+    limit: int = typer.Option(20, "--limit"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Recent sanitized `ops.errors` rows — never a financial payload."""
+    with observer_session_scope() as session:
+        result = status.recent_errors(session, limit=limit)
+    _emit(result, as_json=json_output, title="recent-errors")
+
+
+@app.command()
+def restart(
+    compose_file: str = typer.Option(DEFAULT_COMPOSE_FILE, "--compose-file"),
+) -> None:
+    """Restart the `app` container via `docker compose restart app`.
+
+    Must run on the host already running the compose stack (the VPS) —
+    this is the narrow, auditable substitute for ad hoc shell/SSH access
+    per ADR-007."""
+    try:
+        run_compose(compose_file, "restart", "app")
+    except ComposeError as exc:
+        console.print(f"[red]restart failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    console.print("[green]app restarted[/green]")
+
+
+@app.command()
+def deploy(
+    release_id: str = typer.Argument(..., help="Immutable Git SHA to deploy (image tag)."),
+    compose_file: str = typer.Option(DEFAULT_COMPOSE_FILE, "--compose-file"),
+) -> None:
+    """Deploy an image already published to the registry, by Git SHA.
+
+    Sequence (ADR-008): pull the tagged image, bring the stack up under
+    that tag, verify health, and record the release as `current` — or, on
+    a failed health check, automatically roll back to the previous known-
+    good release and record this attempt as `failed`. Run this on the VPS
+    after CI has published `<container_image_repo>:<release_id>` to GHCR
+    and the production-deploy approval gate has passed
+    (docs/deployment.md)."""
+    if not _RELEASE_ID_RE.match(release_id):
+        console.print(f"[red]not a valid release id (expected a Git SHA):[/red] {release_id}")
+        raise typer.Exit(2)
+
+    settings = get_settings()
+    image_ref = f"{settings.container_image_repo}:{release_id}"
+    env = {"RELEASE_ID": release_id}
+
+    with session_scope() as session:
+        release = release_ops.start_deploy(session, release_id=release_id, image_ref=image_ref)
+        release_row_id = release.id
+
+    try:
+        run_compose(compose_file, "pull", "app", env=env)
+        run_compose(compose_file, "up", "-d", "app", env=env)
+    except ComposeError as exc:
+        with session_scope() as session:
+            release = session.get(Release, release_row_id)
+            assert release is not None
+            release_ops.mark_failed(session, release, reason=str(exc))
+        console.print(f"[red]deploy failed to start:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    with observer_session_scope() as obs_session:
+        health = status.aggregate_health(obs_session, settings)
+
+    with session_scope() as session:
+        release = session.get(Release, release_row_id)
+        assert release is not None
+        if health["overall"] == "healthy":
+            release_ops.mark_healthy(session, release)
+            deployed_ok = True
+        else:
+            release_ops.mark_failed(session, release, reason=f"post-deploy health: {health}")
+            deployed_ok = False
+
+    if deployed_ok:
+        console.print(f"[green]deployed {release_id}[/green] ({image_ref})")
+        return
+
+    console.print(f"[red]post-deploy health check failed:[/red] {health}")
+    console.print("[yellow]rolling back automatically (ADR-008)...[/yellow]")
+    try:
+        _do_rollback(compose_file)
+    except release_ops.NoPreviousReleaseError:
+        console.print(
+            "[red]no previous known-good release to roll back to — manual intervention "
+            "required.[/red]"
+        )
+        raise typer.Exit(1) from None
+    raise typer.Exit(1)
+
+
+@app.command()
+def rollback(
+    compose_file: str = typer.Option(DEFAULT_COMPOSE_FILE, "--compose-file"),
+) -> None:
+    """Roll back to the previously deployed known-good release (ADR-008).
+
+    No image build, no registry fetch beyond what's already local — just
+    bringing the stack up under the previous release's tag."""
+    try:
+        released_id = _do_rollback(compose_file)
+    except release_ops.NoPreviousReleaseError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]rolled back to {released_id}[/green]")
+
+
+def _do_rollback(compose_file: str) -> str:
+    """Shared rollback mechanics for `deploy`'s auto-rollback path and the
+    `rollback` command. Returns the release id now running."""
+    with session_scope() as session:
+        previous = release_ops.get_previous(session)
+        if previous is None:
+            raise release_ops.NoPreviousReleaseError("No previous known-good release is tracked.")
+        target_release_id = previous.release_id
+
+    env = {"RELEASE_ID": target_release_id}
+    run_compose(compose_file, "up", "-d", "app", env=env)
+
+    with session_scope() as session:
+        release_ops.rollback(session)
+    return target_release_id
 
 
 if __name__ == "__main__":
