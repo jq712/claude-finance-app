@@ -180,6 +180,22 @@ def test_finance_backup_can_read_every_schema_but_not_write(role_engine) -> None
         conn.exec_driver_sql("INSERT INTO ops.job_runs (job_name) VALUES ('blocked')")
 
 
+def test_finance_backup_cannot_advance_sequences(role_engine) -> None:
+    """`finance_backup` must be able to *read* a sequence's current value
+    (pg_dump needs this -- see test_finance_backup_can_read_sequences
+    above) without being able to *mutate* it. SELECT on a sequence and
+    USAGE/nextval() are separate grants in Postgres; a role that can call
+    nextval() could silently perturb an id sequence an ordinary backup
+    role has no business touching. Tested, not asserted, per
+    docs/security-model.md's "tested, not asserted" invariant."""
+    engine = role_engine("finance_backup")
+    with (
+        engine.connect() as conn,
+        pytest.raises(ProgrammingError, match="permission denied"),
+    ):
+        conn.exec_driver_sql("SELECT nextval('plaid.items_id_seq')")
+
+
 def test_no_arbitrary_sql_tool_exists_in_the_agent_tool_registry() -> None:
     """Static guard for docs/security-model.md invariant 2. There is no
     tools package yet (Milestone 5 builds it) — this test exists now so

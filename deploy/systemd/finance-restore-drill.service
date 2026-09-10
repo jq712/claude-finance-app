@@ -8,6 +8,18 @@ Requires=docker.service
 Type=oneshot
 WorkingDirectory=/opt/finance-app
 
+# See finance-app.service for rationale -- same sandboxing profile for
+# this unit's `docker compose`/restore-verify.sh invocation. PrivateTmp
+# is compatible with restore-verify.sh's `mktemp` scratch-password file.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
 LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
 LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
 LoadCredentialEncrypted=finance_agent_db_password:/etc/finance-app/credentials/finance_agent_db_password.cred

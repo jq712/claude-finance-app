@@ -8,6 +8,17 @@ Requires=docker.service
 Type=oneshot
 WorkingDirectory=/opt/finance-app
 
+# See finance-app.service for rationale -- same sandboxing profile for
+# this unit's `docker compose`/health-check invocation.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
 # Uses finance_app (not finance_observer) — see ops/health.py's module
 # docstring: this unit's `check_health()` writes an ops.errors row on
 # failure, which finance_observer cannot do.

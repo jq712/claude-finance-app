@@ -12,6 +12,17 @@ Requires=docker.service
 Type=oneshot
 WorkingDirectory=/opt/finance-app
 
+# See finance-app.service for rationale -- same sandboxing profile for
+# this unit's `docker compose`/sync invocation.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
 LoadCredentialEncrypted=plaid_client_id:/etc/finance-app/credentials/plaid_client_id.cred
 LoadCredentialEncrypted=plaid_secret:/etc/finance-app/credentials/plaid_secret.cred
 LoadCredentialEncrypted=plaid_access_token:/etc/finance-app/credentials/plaid_access_token.cred

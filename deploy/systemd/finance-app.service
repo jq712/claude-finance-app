@@ -10,6 +10,24 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/finance-app
 
+# Sandboxing for the host-side `docker compose` CLI process this unit
+# execs. It only needs to read compose.yaml/scripts under
+# WorkingDirectory, write to a private /tmp, and connect to the Docker
+# socket (a connect() on an existing inode, which a read-only mount does
+# not block) -- nothing here needs write access to the rest of the host
+# filesystem. Validate with `systemd-analyze security finance-app.service`
+# after deploying; these are the standard, widely-used defaults for a
+# docker-CLI wrapper unit, not exhaustively tested against this repo's
+# exact scripts on a real VPS.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
 # Production secret material (handoff §4.4, ADR-010) — minted once via
 # `systemd-creds encrypt` per docs/runbooks/deploy.md, never as plaintext
 # files or environment variables on disk. Decrypted only into this unit's

@@ -56,6 +56,8 @@ Protected material: Plaid client ID, Plaid production secret, Plaid access token
 
 Stored as systemd encrypted credentials on the VPS. Never in committed files, never in a plaintext `.env`, never in CI, never in an agent session. `.claude/settings.json` denies reads of credential paths and blocks `ssh`/`scp`/`rsync`, so the engineering environment has no route to production even if a session misjudges.
 
+**Known gap: secrets still cross into container environment variables.** `with-production-env.sh` decrypts each systemd credential and exports it as a plain process environment variable so `docker compose`'s `${VAR}` interpolation can reach it; `deploy/compose.yaml` then passes those variables into each service's `environment:` block. That is stronger than a plaintext file on disk (credentials never touch the filesystem unencrypted, and `docker compose` itself never persists them), but it is weaker than the invariant's framing implies once a container is actually running: for that container's lifetime, its secrets are ordinary process environment variables, visible to anything with `docker inspect` access, a shell in the container, or `/proc/<pid>/environ` on the host. Docker-native file-based secrets (bind-mounting `$CREDENTIALS_DIRECTORY` into each container and reading `*_FILE` paths instead of `*` env vars) would close this, but that is a topology change across every service in `deploy/compose.yaml` and the settings-loading path in `finance_app.config`, not a fix that belongs in an unrelated bug-fix pass. Tracked as a follow-up; see `docs/backups.md`'s "Deliberately deferred" section for the same note in the backup-specific context.
+
 ### 5. Least privilege in the database
 
 | Role | Purpose |

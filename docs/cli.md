@@ -63,7 +63,7 @@ diagnostic/deployment surface handoff §10 requires so autonomous engineering ag
 
 | Command | Purpose | Connects as |
 | --- | --- | --- |
-| `finops version [--json]` | App version + running release id | `finance_observer` |
+| `finops version [--json]` | App version + running release id | none (reads in-process version string + `RELEASE_ID` env var; no DB connection) |
 | `finops health [--json]` | Aggregate database/migration/sync/backup health; exits non-zero if unhealthy | `finance_observer` |
 | `finops sync-status [--json]` | Most recent Plaid sync run and cursor state | `finance_observer` |
 | `finops db-status [--json]` | Database reachability | `finance_observer` |
