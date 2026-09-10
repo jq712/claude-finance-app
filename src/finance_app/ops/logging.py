@@ -15,6 +15,7 @@ Two hard rules this module exists to make easy to follow correctly:
 import datetime
 import json
 import logging
+import re
 import sys
 from typing import Any
 
@@ -33,7 +34,42 @@ _REDACTED_KEY_FRAGMENTS = (
     "credential",
 )
 
+# Key-name matching alone misses a secret that lands in a context dict
+# under an innocuous key -- e.g. `{"detail": f"connection failed: {dsn}"}`
+# where `dsn` embeds a role password, or a raw provider API key pasted
+# into an error message. These patterns catch the *shape* of a secret
+# regardless of what key it's filed under. Deliberately conservative in
+# the same direction as the key-fragment list: a false positive here
+# costs nothing (this is diagnostic logging, not user-facing output); a
+# real secret reaching a log line is what CLAUDE.md's "NEVER" list exists
+# to prevent.
+_VALUE_PATTERNS = (
+    # scheme://user:password@host -- any DSN-shaped string with an
+    # embedded credential (postgresql[+psycopg]://, etc).
+    re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s/:@]+:[^\s/@]+@"),
+    # OpenAI/Anthropic-style API keys (both use an `sk-` prefix).
+    re.compile(r"\bsk-[A-Za-z0-9_-]{10,}"),
+)
+
 _REDACTED = "[redacted]"
+
+
+def _looks_like_a_secret(value: str) -> bool:
+    return any(pattern.search(value) for pattern in _VALUE_PATTERNS)
+
+
+def _sanitize_value(value: Any) -> Any:
+    """Recurse into dicts and lists (QA/security-model.md invariant 6 —
+    `sanitize_context` previously only recursed into dicts, so a secret
+    inside a list value was never redacted at all) and value-scan strings
+    for secret-shaped content regardless of the key they're filed under."""
+    if isinstance(value, dict):
+        return sanitize_context(value)
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    if isinstance(value, str) and _looks_like_a_secret(value):
+        return _REDACTED
+    return value
 
 
 def sanitize_context(context: dict[str, Any] | None) -> dict[str, Any]:
@@ -50,10 +86,8 @@ def sanitize_context(context: dict[str, Any] | None) -> dict[str, Any]:
         lowered = key.lower()
         if any(fragment in lowered for fragment in _REDACTED_KEY_FRAGMENTS):
             clean[key] = _REDACTED
-        elif isinstance(value, dict):
-            clean[key] = sanitize_context(value)
         else:
-            clean[key] = value
+            clean[key] = _sanitize_value(value)
     return clean
 
 

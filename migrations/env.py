@@ -18,7 +18,7 @@ if config.config_file_name is not None:
 # Migrations run DDL and create roles, so they connect as the bootstrap
 # `finance_migrator` role, not the least-privilege runtime `finance_app`
 # role settings.database_url points at. See config/settings.py.
-config.set_main_option("sqlalchemy.url", get_settings().alembic_database_url)
+config.set_main_option("sqlalchemy.url", get_settings().alembic_database_url.get_secret_value())
 
 target_metadata = Base.metadata
 

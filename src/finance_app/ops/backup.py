@@ -317,7 +317,7 @@ def create_backup(settings: Settings | None = None) -> BackupResult:
     try:
         with _sigterm_as_backup_error("backup"):
             row_counts = _dump_with_consistent_snapshot(
-                settings.backup_database_url, plaintext_path
+                settings.backup_database_url.get_secret_value(), plaintext_path
             )
             _run(
                 [

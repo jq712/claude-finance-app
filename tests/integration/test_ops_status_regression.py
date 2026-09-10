@@ -97,10 +97,10 @@ def test_a_failing_backup_makes_aggregate_health_unhealthy(clean_backup_runs) ->
         session.commit()
 
         settings = Settings(
-            database_url=role_dsn("finance_app"),
-            alembic_database_url=role_dsn("finance_migrator"),
-            agent_database_url=role_dsn("finance_agent"),
-            observer_database_url=role_dsn("finance_observer"),
+            database_url=role_dsn("finance_app"),  # type: ignore[arg-type]
+            alembic_database_url=role_dsn("finance_migrator"),  # type: ignore[arg-type]
+            agent_database_url=role_dsn("finance_agent"),  # type: ignore[arg-type]
+            observer_database_url=role_dsn("finance_observer"),  # type: ignore[arg-type]
         )
         result = status.aggregate_health(session, settings)
 

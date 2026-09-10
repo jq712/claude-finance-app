@@ -16,10 +16,20 @@ class Settings(BaseSettings):
 
     finance_env: str = "development"
 
-    database_url: str = "postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev"
+    # DSN fields are `SecretStr`, not plain `str` (they embed a role
+    # password) — a plain string field is exactly the kind of value
+    # `ops/logging.py`'s `sanitize_context` can miss if it's ever passed
+    # through structured logging by key name alone; `SecretStr` makes the
+    # raw value opaque by construction (`repr()`/`str()` both redact it,
+    # only `.get_secret_value()` reveals it) as defense in depth on top of
+    # that redaction. Every call site does `.get_secret_value()` once, at
+    # the point it hands the DSN to SQLAlchemy/libpq.
+    database_url: SecretStr = SecretStr(
+        "postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev"
+    )
     # Migrations run DDL and create roles, so they use the bootstrap/owner
     # role rather than the least-privilege `finance_app` runtime role.
-    alembic_database_url: str = (
+    alembic_database_url: SecretStr = SecretStr(
         "postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev"
     )
     # The runtime agent's own least-privilege connection (handoff §7.1,
@@ -27,7 +37,7 @@ class Settings(BaseSettings):
     # which can write plaid.*) — using the wrong connection here would
     # silently defeat the database-level boundary that keeps the agent off
     # raw Plaid facts. See docs/security-model.md invariant 5.
-    agent_database_url: str = (
+    agent_database_url: SecretStr = SecretStr(
         "postgresql+psycopg://finance_agent:devpassword@localhost:5433/finance_dev"
     )
 
@@ -36,7 +46,7 @@ class Settings(BaseSettings):
     # grants added in migrations/versions/0004. Deliberately never
     # database_url/finance_app: finops diagnoses production, it does not
     # get application write authority. See docs/security-model.md.
-    observer_database_url: str = (
+    observer_database_url: SecretStr = SecretStr(
         "postgresql+psycopg://finance_observer:devpassword@localhost:5433/finance_dev"
     )
 
@@ -59,7 +69,7 @@ class Settings(BaseSettings):
     # --- Backups (Milestone 7, ADR-015) --------------------------------
     # `finance_backup` is read-only everywhere (migrations/versions/0002),
     # so pg_dump always runs as this role, never as finance_app/finance_owner.
-    backup_database_url: str = (
+    backup_database_url: SecretStr = SecretStr(
         "postgresql+psycopg://finance_backup:devpassword@localhost:5433/finance_dev"
     )
     # Passphrase for symmetric GPG encryption of backup archives before they

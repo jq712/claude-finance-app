@@ -21,7 +21,9 @@ _sessionmaker: sessionmaker[Session] | None = None
 def get_agent_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = create_engine(get_settings().agent_database_url, pool_pre_ping=True)
+        _engine = create_engine(
+            get_settings().agent_database_url.get_secret_value(), pool_pre_ping=True
+        )
     return _engine
 
 

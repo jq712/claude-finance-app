@@ -62,10 +62,10 @@ def _clean_backup_runs():
 @pytest.fixture
 def backup_settings(tmp_path) -> Settings:
     return Settings(
-        database_url=role_dsn("finance_app"),
-        alembic_database_url=role_dsn("finance_migrator"),
-        agent_database_url=role_dsn("finance_agent"),
-        backup_database_url=role_dsn("finance_backup"),
+        database_url=role_dsn("finance_app"),  # type: ignore[arg-type]
+        alembic_database_url=role_dsn("finance_migrator"),  # type: ignore[arg-type]
+        agent_database_url=role_dsn("finance_agent"),  # type: ignore[arg-type]
+        backup_database_url=role_dsn("finance_backup"),  # type: ignore[arg-type]
         backup_encryption_key="test-only-passphrase-not-a-real-secret",  # type: ignore[arg-type]
         backup_dir=str(tmp_path / "backups"),
     )
