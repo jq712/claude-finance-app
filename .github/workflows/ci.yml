@@ -166,18 +166,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docs-freshness:
-    # A PR whose title or branch name identifies it as completing/advancing a
-    # Milestone (the convention every Milestone 0-6 PR and this repo's
-    # branch names follow) must move README.md's Status line in the same
-    # PR. This exists because it already happened once for real: the
-    # Milestone 6 PR merged without touching README, which kept claiming
-    # "Milestone 5 complete" through all of Milestone 6 and well into
-    # Milestone 7 (CLAUDE.md/handoff §31 Definition of Done, ADR-017's
-    # neighboring "docs as durable memory" principle, handoff §27). Cheap,
-    # heuristic, and intentionally narrow — it only fires on PRs that look
-    # milestone-shaped; it is not a general "are the docs stale" check.
+    # A PR into `main` whose title or branch name identifies it as
+    # completing/advancing a Milestone (the convention every Milestone 0-6
+    # PR and this repo's branch names follow) must move README.md's Status
+    # line in the same PR. This exists because it already happened once
+    # for real: the Milestone 6 PR merged without touching README, which
+    # kept claiming "Milestone 5 complete" through all of Milestone 6 and
+    # well into Milestone 7 (CLAUDE.md/handoff §31 Definition of Done,
+    # handoff §27's "docs as durable memory"). Scoped to base == main
+    # because that is the moment a milestone actually lands and README's
+    # status becomes wrong if untouched — mid-milestone implementation PRs
+    # into a `milestone-N-*` integration branch inherit "milestone" in
+    # their branch names without completing anything (PR #13 was the false
+    # positive that proved it). Cheap, heuristic, and intentionally
+    # narrow; it is not a general "are the docs stale" check.
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
     steps:
       - uses: actions/checkout@v4
         with:
