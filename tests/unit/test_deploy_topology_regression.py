@@ -167,9 +167,7 @@ def test_no_compose_service_declares_a_required_interpolation_variable() -> None
     of this test (QA-33/security review) stayed green whether or not the
     real defect was fixed."""
     non_comment_lines = "\n".join(
-        line
-        for line in _COMPOSE_FILE.read_text().splitlines()
-        if not line.lstrip().startswith("#")
+        line for line in _COMPOSE_FILE.read_text().splitlines() if not line.lstrip().startswith("#")
     )
     required = set(_REQUIRED_VAR_RE.findall(non_comment_lines))
     assert not required, (

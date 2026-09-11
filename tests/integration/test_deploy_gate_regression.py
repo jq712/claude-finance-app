@@ -48,6 +48,7 @@ def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
         return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
     return subprocess.CompletedProcess(list(args), 0, "", "")
 
+
 runner = CliRunner()
 
 
