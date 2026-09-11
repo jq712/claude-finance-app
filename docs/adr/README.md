@@ -22,3 +22,4 @@ Format: **Context** (what forced the decision) Â· **Decision** (what we chose) Â
 | [014](ADR-014-provider-interchangeable-runtime-agent.md) | Provider-interchangeable runtime financial agent (OpenAI or Claude API) |
 | [015](ADR-015-backup-encryption-gpg-symmetric.md) | Backup encryption via GPG symmetric encryption, keyed by a single systemd credential |
 | [016](ADR-016-production-deployment-control-plane.md) | Production deployment control plane: Compose interpolation, no long-running `app` until Milestone 8, and release-promotion concurrency |
+| [017](ADR-017-autonomous-continuation-policy.md) | Autonomous continuation policy: Class A auto-merge, Class B/C hold for a human, merge is never deploy |

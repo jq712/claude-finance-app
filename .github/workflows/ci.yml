@@ -165,6 +165,37 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  docs-freshness:
+    # A PR whose title or branch name identifies it as completing/advancing a
+    # Milestone (the convention every Milestone 0-6 PR and this repo's
+    # branch names follow) must move README.md's Status line in the same
+    # PR. This exists because it already happened once for real: the
+    # Milestone 6 PR merged without touching README, which kept claiming
+    # "Milestone 5 complete" through all of Milestone 6 and well into
+    # Milestone 7 (CLAUDE.md/handoff §31 Definition of Done, ADR-017's
+    # neighboring "docs as durable memory" principle, handoff §27). Cheap,
+    # heuristic, and intentionally narrow — it only fires on PRs that look
+    # milestone-shaped; it is not a general "are the docs stale" check.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: README Status line must move with a milestone PR
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if printf '%s\n%s\n' "$PR_TITLE" "$PR_BRANCH" | grep -qiE '(^|[^0-9])milestone[ _-]?[0-9]+'; then
+            if ! git diff --name-only "$BASE_SHA"...HEAD | grep -qx 'README.md'; then
+              echo "::error::This PR's title or branch name references a Milestone but does not update README.md. Update README.md's Status line in this PR (CLAUDE.md / handoff §31 Definition of Done) — or, if the milestone genuinely isn't complete yet, note that in the PR description; this check only looks for any README.md change, not a specific wording."
+              exit 1
+            fi
+          fi
+
   container-build:
     # Milestone 7 (handoff §18, §29): every PR proves the image still
     # builds. Never pushes anywhere — that only happens from `main`, in

@@ -2,7 +2,7 @@
 
 A single-user, headless financial intelligence application. One Plaid Item → PostgreSQL → deterministic analytics → a CLI plus a conversational financial agent, running on one Linux VPS.
 
-**Status:** Milestone 5 complete. `finance chat` is a conversational interface to the Milestone 3 analytics layer, running on a provider-interchangeable runtime agent (OpenAI or the Claude API, via `AGENT_PROVIDER` — [ADR-014](docs/adr/ADR-014-provider-interchangeable-runtime-agent.md)) with a fixed semantic tool set, read-only on `plaid.*`. The deterministic `finance` CLI (`status`, `sync`, `spending`, `income`, `cashflow`, `budget`, `transactions recent`/`search`) still requires no LLM. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design, [`docs/analytics.md`](docs/analytics.md) for the analytics design, [`docs/cli.md`](docs/cli.md) for the CLI, and [`docs/financial-agent.md`](docs/financial-agent.md) for the runtime agent.
+**Status:** Milestones 0–6 complete (database foundation, Plaid sync, deterministic analytics, CLI, provider-interchangeable conversational agent, agent eval framework). Milestone 7 (production deployment — Docker/Compose topology, hardened systemd units, CI/CD build/publish/preflight/staging/gate, backup encryption, release/rollback bookkeeping) is in progress on `milestone-7-production-deployment`; no production VPS is provisioned yet. `finance chat` is a conversational interface to the analytics layer, running on a provider-interchangeable runtime agent (OpenAI or the Claude API, via `AGENT_PROVIDER` — [ADR-014](docs/adr/ADR-014-provider-interchangeable-runtime-agent.md)) with a fixed semantic tool set, read-only on `plaid.*`. The deterministic `finance` CLI (`status`, `sync`, `spending`, `income`, `cashflow`, `budget`, `transactions recent`/`search`) still requires no LLM. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design, [`docs/analytics.md`](docs/analytics.md) for the analytics design, [`docs/cli.md`](docs/cli.md) for the CLI, [`docs/financial-agent.md`](docs/financial-agent.md) for the runtime agent, and [`docs/deployment.md`](docs/deployment.md) for the production topology.
 
 ## The core idea
 
@@ -66,11 +66,13 @@ uv run ruff format . && uv run ruff check .
 uv run pyright
 ```
 
-The next task is Milestone 6: the agent eval framework — a golden financial dataset, tool-call/permission/result assertions, runnable per configured `AgentProvider`. Start a Claude Code session in this directory and:
+The next task is finishing Milestone 7 (production deployment) on `milestone-7-production-deployment`, then Milestone 8 (Plaid webhook). Start a Claude Code session in this directory and:
 
 ```text
 Continue executing CLAUDE_FINANCE_APP_HANDOFF.md from the first incomplete milestone.
 ```
+
+This runs under the standing autonomy contract in [ADR-017](docs/adr/ADR-017-autonomous-continuation-policy.md): Class A changes get implemented and merged autonomously once CI is green; Class B changes get implemented and reviewed but wait as an open PR for you to merge; Class C stops and leaves a note. Applies the same way whether the session is interactive or a scheduled routine — see [`docs/runbooks/autonomous-continuation.md`](docs/runbooks/autonomous-continuation.md) for what to check after a run.
 
 ## Guardrails you will hit
 
