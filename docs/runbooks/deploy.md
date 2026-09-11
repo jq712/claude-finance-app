@@ -60,23 +60,27 @@ as `finance-app.service` for the duration of one command:
 ```
 finops_run() {
     sudo systemd-run --pty --wait --collect --same-dir \
-        $(sed -n 's/^LoadCredentialEncrypted=/--property=LoadCredentialEncrypted=/p' \
-            /etc/systemd/system/finance-app.service) \
-        -- /opt/finance-app/deploy/scripts/with-production-env.sh \
+        --property=LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred \
+        --property=LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred \
+        --property=LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred \
+        -- /opt/finance-app/deploy/scripts/with-production-env.sh deploy -- \
            /opt/finance-app/deploy/scripts/finops.sh "$@"
 }
 ```
 
 Paste that function into your shell once per SSH session; the rest of this
 runbook calls it as `finops_run deploy <sha>` / `finops_run rollback` /
-`finops_run restart`. The `sed` line derives the `--property=LoadCredentialEncrypted=...` flags
-directly from `finance-app.service` so this can't drift out of sync with
-the unit file's actual credential list. If `with-production-env.sh` is run
-any other way, it now fails loudly with this same command rather than
-silently proceeding with an empty credential set (a real defect found in
-review: `deploy/compose.yaml`'s `${VAR:?required}` interpolation used to
-fail with a confusing "variable is required" error instead of the real
-problem).
+`finops_run restart`. The three `--property=LoadCredentialEncrypted=...`
+flags are ADR-016 D1's `deploy` job's credential set — deliberately **not**
+derived from `finance-app.service`, which under D1 holds only
+`finance_app_db_password` (the `app` job's own, much narrower, set) and so
+can no longer stand in for `deploy`'s. Unlike `with-production-env.sh`'s
+own job matrix — which `tests/unit/test_deploy_topology_regression.py`'s
+drift test keeps mechanically in sync with `deploy/compose.yaml` — this
+list is plain prose and must be updated by hand if that matrix's `deploy`
+entry ever changes. If `with-production-env.sh` is run any other way, or
+without a job argument, it fails loudly rather than silently proceeding
+with an empty or wrong credential set.
 
 ## 3. First deploy
 
@@ -124,7 +128,7 @@ Rolls back to the tracked previous known-good release — no rebuild, no registr
 finops_run restart
 ```
 
-Restarts only the `app` container — does not touch Postgres, does not change `ops.releases`. Use this when the app process itself needs to come back (e.g. after a transient resource issue), not as a substitute for a release.
+ADR-016 D2: `app` is a one-shot `docker compose --profile app run --rm` command until Milestone 8's webhook server, not a long-running process — there is nothing to restart in the traditional sense. `finops restart` re-runs `finance selfcheck` against the currently-recorded release and reports whether it's still healthy; it touches neither Postgres nor `ops.releases`. Use it to re-confirm the deployed release is healthy without deploying anything new — once Milestone 8 lands, this regains a real process to restart.
 
 ## 7. Credential rotation
 

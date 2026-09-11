@@ -29,13 +29,12 @@
 # For the named job, this script exports *only* that job's required
 # variables (never the entire credential directory), fails loudly —
 # naming both the job and the missing credential — if a required one is
-# absent, and rejects an empty value for a required credential exactly as
-# hard as a missing one (an empty `BACKUP_ENCRYPTION_KEY`, in particular,
-# would make `gpg --symmetric` silently produce a backup anyone can
-# decrypt). This mapping is the contract `tests/unit/
-# test_deploy_topology_regression.py`'s drift test keeps in sync with
-# `deploy/compose.yaml` — never delete that test, even after this script
-# changes shape again.
+# absent or empty or whitespace-only, and never trusts a value already
+# present in this process's own (inherited) environment as a substitute
+# for one actually read from $CREDENTIALS_DIRECTORY. This mapping is the
+# contract `tests/unit/test_deploy_topology_regression.py`'s drift test
+# keeps in sync with `deploy/compose.yaml` — never delete that test, even
+# after this script changes shape again.
 #
 # Relies on $CREDENTIALS_DIRECTORY, which systemd sets automatically for
 # any unit using LoadCredential=/LoadCredentialEncrypted= (see
@@ -58,10 +57,15 @@ if [ -z "${CREDENTIALS_DIRECTORY:-}" ]; then
     echo "relies on. Run it via 'systemd-run' instead, e.g. for finops:" >&2
     echo "" >&2
     echo "  sudo systemd-run --pty --wait --collect --same-dir \\" >&2
-    echo "    \$(sed -n 's/^LoadCredentialEncrypted=/--property=LoadCredentialEncrypted=/p' \\" >&2
-    echo "        /etc/systemd/system/finance-app.service) \\" >&2
+    echo "    --property=LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred \\" >&2
+    echo "    --property=LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred \\" >&2
+    echo "    --property=LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred \\" >&2
     echo "    -- /opt/finance-app/deploy/scripts/with-production-env.sh deploy -- \\" >&2
     echo "       /opt/finance-app/deploy/scripts/finops.sh deploy <sha>" >&2
+    echo "" >&2
+    echo "(that is the 'deploy' job's own credential set — NOT derived from" >&2
+    echo "finance-app.service, which under ADR-016 D1 holds only its own, much" >&2
+    echo "narrower, 'postgres' job credential.)" >&2
     echo "" >&2
     echo "See docs/runbooks/deploy.md for the full, copy-pasteable command per" >&2
     echo "operation (deploy/rollback/restart). Refusing to exec '$*' with an" >&2
@@ -139,66 +143,79 @@ _required_for_job() {
 
 REQUIRED="$(_required_for_job "$JOB")"
 
-# Only export variables belonging to this job's own credential set — even
-# though $CREDENTIALS_DIRECTORY may hold every credential the unit's
-# LoadCredentialEncrypted= list declares (that list is trimmed per-job in
-# deploy/systemd/*.service, but this script does not rely on that trim
-# alone for the boundary).
-#
-# POSIX `sh` cannot export a variable from inside a piped `while` (it runs
-# in a subshell); stage name=value pairs through a private temp file
-# instead and export them in this shell afterward. Never world-readable,
-# removed unconditionally.
-_WPE_TMP="$(mktemp)"
-chmod 600 "$_WPE_TMP"
-trap 'rm -f "$_WPE_TMP"' EXIT
-
-_credential_names | while IFS='=' read -r name env_var; do
-    case " $REQUIRED " in
-        *" $env_var "*) : ;;
-        *) continue ;;
-    esac
-    file="${CREDENTIALS_DIRECTORY}/$name"
-    if [ -f "$file" ]; then
-        value=$(cat "$file")
-        printf '%s\n' "$env_var=$value" >> "$_WPE_TMP"
-    fi
-done
-
-while IFS= read -r line; do
-    export "$line"
-done < "$_WPE_TMP"
-
 # `app`'s active-provider-key requirement is either/or, not a fixed name
 # in the matrix above — resolve it against AGENT_PROVIDER (defaulting to
-# openai, matching config/settings.py's own default) and export/require
-# whichever key is active.
+# openai, matching config/settings.py's own default) and add whichever
+# key is active to $REQUIRED before export/validation runs, so both go
+# through the exact same path as every other credential below.
 if [ "$JOB" = "app" ]; then
     provider="${AGENT_PROVIDER:-openai}"
     case "$provider" in
-        openai) provider_env="OPENAI_API_KEY"; provider_cred="openai_api_key" ;;
-        anthropic) provider_env="ANTHROPIC_API_KEY"; provider_cred="anthropic_api_key" ;;
+        openai) provider_env="OPENAI_API_KEY" ;;
+        anthropic) provider_env="ANTHROPIC_API_KEY" ;;
         *)
             echo "with-production-env.sh: job 'app' has unknown AGENT_PROVIDER '$provider'" >&2
             exit 1
             ;;
     esac
-    file="${CREDENTIALS_DIRECTORY}/$provider_cred"
-    if [ -f "$file" ]; then
-        value=$(cat "$file")
-        export "$provider_env=$value"
-    fi
     REQUIRED="$REQUIRED $provider_env"
 fi
 
-# Fail loudly, naming both the job and the missing/empty credential — an
-# empty value is rejected exactly as hard as a missing one (a
-# `${BACKUP_ENCRYPTION_KEY:-}` that resolves to the empty string must
-# never reach `gpg --symmetric` unnoticed).
+# Every credential-mapped variable is unset first, so what this job's
+# child process inherits reflects only what this script itself loaded
+# from $CREDENTIALS_DIRECTORY for *this* job — never a value already
+# sitting in the environment this script was invoked with (an
+# EnvironmentFile=, a stray export in an interactive shell). Without this,
+# a required credential whose file is absent could still appear "present"
+# by inheritance, silently defeating the missing/empty check below.
+for pair in $(_credential_names); do
+    unset "${pair#*=}" 2>/dev/null || true
+done
+
+# Export directly in this shell — no piped `while` (POSIX `sh` runs the
+# pipeline's right-hand side in a subshell, so anything it exports is
+# lost the moment the pipe closes) and no intermediate file (the previous
+# approach: writing plaintext credentials to a `mktemp` file. `exec "$@"`
+# below replaces this process image, so its `EXIT` trap never ran and the
+# file survived on disk for as long as the parent unit stayed active —
+# indefinitely for `finance-app.service`'s `RemainAfterExit=yes`. That
+# file also re-parsed credential *content* as `NAME=VALUE` shell
+# assignments on read-back, so a credential containing a newline could
+# silently truncate itself or inject a value into an unrelated variable).
+# `$(_credential_names)` is safe to word-split on default IFS: every
+# entry is `stem=ENV_VAR` with no internal whitespace.
+for pair in $(_credential_names); do
+    name="${pair%%=*}"
+    env_var="${pair#*=}"
+    case " $REQUIRED " in
+        *" $env_var "*) : ;;
+        *) continue ;;
+    esac
+    file="${CREDENTIALS_DIRECTORY}/$name"
+    [ -f "$file" ] || continue
+    value=$(cat "$file")
+    # A credential containing a newline must never be exported partially
+    # or re-interpreted — reject it outright rather than silently
+    # truncating it or letting it inject another variable (both possible
+    # if this value were ever round-tripped through a NAME=VALUE line
+    # instead of `export` taking it as one opaque string, as here).
+    if [ "$(printf '%s\n' "$value" | wc -l)" -gt 1 ]; then
+        echo "with-production-env.sh: credential '$name' (job '$JOB') contains an embedded newline — refusing to export it" >&2
+        exit 1
+    fi
+    export "$env_var=$value"
+done
+
+# Fail loudly, naming both the job and the missing/empty/whitespace-only
+# credential — rejected exactly as hard as a missing one (a
+# `${BACKUP_ENCRYPTION_KEY:-}` that resolves to whitespace must never
+# reach `gpg --symmetric` unnoticed; likewise a single stray keystroke
+# while minting a credential, per docs/runbooks/deploy.md).
 for env_var in $REQUIRED; do
     eval "value=\${$env_var:-}"
-    if [ -z "$value" ]; then
-        echo "with-production-env.sh: job '$JOB' requires $env_var, but it is missing or empty" >&2
+    stripped=$(printf '%s' "$value" | tr -d '[:space:]')
+    if [ -z "$stripped" ]; then
+        echo "with-production-env.sh: job '$JOB' requires $env_var, but it is missing, empty, or whitespace-only" >&2
         echo "(checked \$CREDENTIALS_DIRECTORY/<name>.cred via systemd LoadCredentialEncrypted=)" >&2
         exit 1
     fi

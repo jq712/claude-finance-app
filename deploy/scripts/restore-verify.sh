@@ -104,7 +104,6 @@ docker run -d --name "$SCRATCH_CONTAINER" \
     -e POSTGRES_DB=finance_restore_drill \
     -v "$SCRATCH_STAGING_DIR:/run/scratch:ro" \
     postgres:17-alpine >/dev/null
-rm -f "$SCRATCH_PASSWORD_FILE"
 
 echo "restore-verify: waiting for scratch instance ${SCRATCH_CONTAINER} to accept connections..." >&2
 i=0
@@ -117,6 +116,17 @@ until docker exec "$SCRATCH_CONTAINER" pg_isready -U finance_migrator -d finance
     fi
     sleep 2
 done
+
+# Only now, with the scratch instance confirmed ready (so its entrypoint
+# has already read POSTGRES_PASSWORD_FILE) — not immediately after `docker
+# run -d`. The bind mount source is the *directory*, not the file (D7
+# above), so a host-side unlink is visible inside the container the
+# instant it happens; deleting it right after `docker run -d` races the
+# container's own startup (which returns before the entrypoint has
+# necessarily opened the file) and can make the entrypoint fail with
+# "no such file", reproducing the exact "scratch instance never became
+# ready" failure this staging change was meant to fix.
+rm -f "$SCRATCH_PASSWORD_FILE"
 
 TARGET_URL="postgresql+psycopg://finance_migrator:${SCRATCH_PASSWORD}@${SCRATCH_CONTAINER}:5432/finance_restore_drill"
 

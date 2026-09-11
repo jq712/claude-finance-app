@@ -14,6 +14,9 @@ All `xfail(strict=True)`; remove the marker once fixed.
 
 from __future__ import annotations
 
+import json
+import subprocess
+
 import pytest
 from sqlalchemy import text
 from typer.testing import CliRunner
@@ -21,6 +24,20 @@ from typer.testing import CliRunner
 from finance_app.cli.finops import app
 
 pytestmark = pytest.mark.integration
+
+
+def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
+    compose_file, *args, env=None, **kwargs
+):
+    """Stands in for `ops.compose.run_compose`: every call succeeds, and a
+    `finance selfcheck --json` run (ADR-016 D3 — `ops.status.probe_release`)
+    reports the pinned `RELEASE_ID` as healthy, so tests using this fake
+    exercise a deploy whose *release* is fine and are free to focus on
+    whatever else they're actually testing."""
+    if "selfcheck" in args:
+        payload = json.dumps({"release_id": (env or {}).get("RELEASE_ID"), "overall": "healthy"})
+        return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
+    return subprocess.CompletedProcess(list(args), 0, "", "")
 
 runner = CliRunner()
 
@@ -120,14 +137,9 @@ def stale_sync_and_two_good_releases(role_engine):
 def test_a_pre_existing_stale_sync_does_not_auto_roll_back_an_unrelated_deploy(
     stale_sync_and_two_good_releases, monkeypatch
 ) -> None:
-    import subprocess
-
     import finance_app.cli.finops as finops_module
 
-    def fake_run_compose(compose_file, *args, env=None, runner=None):  # noqa: ANN001, ANN002
-        return subprocess.CompletedProcess(list(args), 0, "", "")
-
-    monkeypatch.setattr(finops_module, "run_compose", fake_run_compose)
+    monkeypatch.setattr(finops_module, "run_compose", _healthy_selfcheck_run_compose)
 
     result = runner.invoke(app, ["deploy", "c" * 7])
 

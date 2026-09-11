@@ -17,6 +17,7 @@ narrow, semantic, auditable — not a `psql` prompt.
 """
 
 import datetime
+import json
 from typing import Any
 
 from alembic.config import Config
@@ -264,16 +265,17 @@ def _application_liveness() -> str:
     (QA-8): this function running at all proves the process's import
     graph and settings came up, which a crash-looping container never
     gets to. Deliberately *not* the same check as `deploy_health_check`'s
-    `probe_application` below — that one is externally observed (`docker
-    compose exec` into the just-deployed container, run from the `deploy`
+    `probe_release` below — that one is externally observed (a one-shot
+    `finance selfcheck` run of the exact release image, from the `deploy`
     Compose service, the only one with Docker socket access) and so can
-    actually catch "the container is up but the process inside crashed
-    right after". This one runs from *inside* the process being asked
-    "are you healthy" and so cannot catch that failure mode — it is a
-    weaker signal, used here only because `aggregate_health` is also
-    called from `finops health`/`finance-health.timer`, which run inside
-    the plain `app`/observer context that has no Docker socket access at
-    all. Still strictly better than a literal that could never fail."""
+    actually catch "the release image itself is broken", not just "this
+    already-running process still imports". This one runs from *inside*
+    the process being asked "are you healthy" and so cannot catch that
+    failure mode — it is a weaker signal, used here only because
+    `aggregate_health` is also called from `finops health`/`finance-
+    health.timer`, which run inside the plain `app`/observer context that
+    has no Docker socket access at all. Still strictly better than a
+    literal that could never fail."""
     try:
         get_settings()
     except Exception:  # noqa: BLE001 - any failure here means "not healthy", full stop
@@ -281,56 +283,127 @@ def _application_liveness() -> str:
     return "healthy"
 
 
-def probe_application(
-    compose_file: str = DEFAULT_COMPOSE_FILE, *, run_compose_fn: Any = _run_compose
-) -> str:
-    """Whether the just-deployed `app` container is actually up and
-    responding (QA-8): execs a trivial command inside it. A
-    stopped/crash-looping/nonexistent container makes `docker compose
-    exec` fail non-zero (`ComposeError`), which this reports as
-    `"unreachable"` rather than the previous hardcoded `"healthy"`
-    literal that no real container state could ever change. Only usable
-    from a context with Docker socket access — the `deploy` Compose
-    service (see `deploy_health_check`), never the long-running `app`
-    service itself."""
+def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
+    """The last non-blank line of `finance selfcheck --json`'s stdout,
+    parsed as a JSON object — or `None` if there isn't one. Reads from the
+    end because `docker compose run` can interleave startup chatter (pull
+    progress, container-creation notices) ahead of the command's own
+    output on some Compose versions; the selfcheck payload is always the
+    final line `finance selfcheck --json` prints."""
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def probe_release(
+    *,
+    release_id: str,
+    compose_file: str = DEFAULT_COMPOSE_FILE,
+    run_compose_fn: Any = _run_compose,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """ADR-016 D3: a one-shot run of the *exact image* under deployment —
+    `--profile app run --rm -T app finance selfcheck --json`, with
+    `RELEASE_ID` pinned to `release_id` — replacing the old `exec` into
+    whatever `app` container happened to already be running. That answered
+    only "does some container respond right now"; under D2 there is no
+    long-running `app` container for it to find, and even before D2 it
+    could never tell a healthy release from a stale one still holding the
+    name.
+
+    Returns `{"status": "healthy"|"unhealthy"|"wrong_image"|"unreachable",
+    "reported_release_id": str | None, "detail": ...}`. `"wrong_image"` —
+    the image that actually ran reports a `release_id` other than the one
+    requested — is a failure mode no `exec`-based probe could ever detect,
+    since `exec` never confirms which image is running at all."""
+    env = {"RELEASE_ID": release_id}
     try:
-        run_compose_fn(compose_file, "exec", "-T", "app", "true")
-    except ComposeError:
-        return "unreachable"
-    return "healthy"
+        result = run_compose_fn(
+            compose_file,
+            "--profile",
+            "app",
+            "run",
+            "--rm",
+            "-T",
+            "app",
+            "finance",
+            "selfcheck",
+            "--json",
+            env=env,
+            timeout=timeout,
+        )
+    except ComposeError as exc:
+        payload = _parse_selfcheck_stdout(exc.stdout)
+        if payload is None:
+            return {"status": "unreachable", "reported_release_id": None, "detail": str(exc)}
+        reported = payload.get("release_id")
+        status_value = "wrong_image" if reported != release_id else "unhealthy"
+        return {"status": status_value, "reported_release_id": reported, "detail": payload}
+
+    payload = _parse_selfcheck_stdout(result.stdout)
+    if payload is None:
+        return {
+            "status": "unreachable",
+            "reported_release_id": None,
+            "detail": "selfcheck produced no parseable JSON output",
+        }
+    reported = payload.get("release_id")
+    if reported != release_id:
+        return {"status": "wrong_image", "reported_release_id": reported, "detail": payload}
+    if payload.get("overall") != "healthy":
+        return {"status": "unhealthy", "reported_release_id": reported, "detail": payload}
+    return {"status": "healthy", "reported_release_id": reported, "detail": payload}
 
 
 def deploy_health_check(
     session: Session,
     *,
+    release_id: str,
     compose_file: str = DEFAULT_COMPOSE_FILE,
     run_compose_fn: Any = _run_compose,
 ) -> dict[str, Any]:
     """The narrow health gate `finops deploy` uses to decide whether to
     promote a release to `current` or trigger ADR-008's auto-rollback —
-    checking only things *this deploy* can actually break: is the app
-    container reachable, is the database reachable, are migrations at
-    head. Deliberately does not fold in `aggregate_health`'s broader
-    operational signals (Plaid sync staleness, backup verification) —
-    QA-14: a pre-existing stale sync or unverified backup has nothing to
-    do with whether the release that was *just* deployed is healthy, and
-    conflating the two meant a pre-existing Plaid outage auto-rolled back
-    every subsequent deploy — including the deploy of the fix for that
-    very outage — discarding a known-good release each time (QA-2). See
-    `aggregate_health` for the broader view `finops health`/the health
-    timer use instead."""
+    checking only things *this deploy* can actually break: is the
+    database reachable from the deploy control plane, and does the
+    release image itself (`probe_release`) come up healthy at its own
+    reported migration head. Deliberately does not fold in
+    `aggregate_health`'s broader operational signals (Plaid sync
+    staleness, backup verification) — QA-14: a pre-existing stale sync or
+    unverified backup has nothing to do with whether the release that was
+    *just* deployed is healthy, and conflating the two meant a
+    pre-existing Plaid outage auto-rolled back every subsequent deploy —
+    including the deploy of the fix for that very outage — discarding a
+    known-good release each time (QA-2). See `aggregate_health` for the
+    broader view `finops health`/the health timer use instead.
+
+    Does not call `migration_status` itself (QA-22): this function runs
+    inside the `deploy` Compose service, which is pinned to
+    `${RELEASE_ID:-latest}` from *before* the new release id was known —
+    it is always running the previous release's image, never the one
+    being deployed, so it is structurally unable to know what migration
+    head the new release expects. `probe_release` answers that from
+    inside the release image itself instead."""
     db = db_status(session)
-    migration = migration_status(session) if db["status"] == "healthy" else {"status": "unknown"}
-    application = probe_application(compose_file, run_compose_fn=run_compose_fn)
-    healthy = (
-        db["status"] == "healthy"
-        and migration["status"] == "up_to_date"
-        and application == "healthy"
+    application = probe_release(
+        release_id=release_id, compose_file=compose_file, run_compose_fn=run_compose_fn
+    )
+    healthy = db["status"] == "healthy" and application["status"] == "healthy"
+    detail = application["detail"]
+    migrations_status = (
+        detail.get("migrations", {}).get("status") if isinstance(detail, dict) else "unknown"
     )
     return {
         "overall": "healthy" if healthy else "unhealthy",
         "database": db["status"],
-        "migrations": migration["status"],
+        "migrations": migrations_status,
         "application": application,
     }
 

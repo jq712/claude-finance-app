@@ -9,11 +9,33 @@ Two audiences: the automated weekly drill (`finance-restore-drill.timer`, no own
 
 If you suspect the corruption itself is suspicious (not an ordinary hardware/operator failure) — see `docs/runbooks/incident-class-c.md` first. Restoring over evidence of a Class C incident can destroy exactly what needs to be preserved.
 
+## Setup: running `with-production-env.sh` over SSH
+
+Like `finops deploy`/`rollback`/`restart` (`docs/runbooks/deploy.md` §2.5),
+`with-production-env.sh` only decrypts credentials inside a systemd unit
+declaring `LoadCredentialEncrypted=` — a bare SSH shell has no route to
+that. The commands below all run under job `backup`, whose credential set
+(`deploy/scripts/with-production-env.sh`'s matrix) is
+`FINANCE_BACKUP_DB_PASSWORD`, `FINANCE_APP_DB_PASSWORD`,
+`BACKUP_ENCRYPTION_KEY`:
+
+```
+backup_run() {
+    sudo systemd-run --pty --wait --collect --same-dir \
+        --property=LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred \
+        --property=LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred \
+        --property=LoadCredentialEncrypted=backup_encryption_key:/etc/finance-app/credentials/backup_encryption_key.cred \
+        -- /opt/finance-app/deploy/scripts/with-production-env.sh backup -- "$@"
+}
+```
+
+Paste that once per SSH session; every command below is `backup_run <cmd...>`.
+
 ## Restoring into a scratch database (safe default — inspection, drills, most disaster-recovery rehearsals)
 
 ```
 cd /opt/finance-app
-deploy/scripts/with-production-env.sh deploy/scripts/restore.sh <backup-path> <target-database-url>
+backup_run deploy/scripts/restore.sh <backup-path> <target-database-url>
 ```
 
 - `<backup-path>` — an absolute path *as seen inside the app container*, i.e. under `/var/lib/finance-app/backups/...` (the mounted backup volume). List available backups: `docker compose -f deploy/compose.yaml run --rm app ls -la /var/lib/finance-app/backups`.
@@ -24,7 +46,7 @@ deploy/scripts/with-production-env.sh deploy/scripts/restore.sh <backup-path> <t
 After restoring, run the same sanity checks the weekly drill runs:
 
 ```
-deploy/scripts/with-production-env.sh docker compose -f deploy/compose.yaml run --rm -T app \
+backup_run docker compose -f deploy/compose.yaml --profile app run --rm -T app \
     python -m finance_app.ops.backup verify <backup-run-id> --target-url <target-database-url>
 ```
 
@@ -44,7 +66,7 @@ This is not a `finops` one-liner on purpose — it is the one operation in this 
    read -rs -p "finance_migrator password: " FINANCE_MIGRATOR_DB_PASSWORD; echo
    export TARGET_DATABASE_URL="postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD}@postgres:5432/finance"
    unset FINANCE_MIGRATOR_DB_PASSWORD
-   deploy/scripts/with-production-env.sh deploy/scripts/restore.sh <backup-path> "" <backup-run-id>
+   backup_run deploy/scripts/restore.sh <backup-path> "" <backup-run-id>
    unset TARGET_DATABASE_URL
    ```
    (`<backup-run-id>` — from `docker compose ... run --rm app python -m finance_app.ops.backup latest` or `finops backup-status` — is optional but strongly recommended here: it verifies the artifact's recorded sha256 before decrypting, the one channel that would otherwise let a substituted or corrupted-in-place backup silently restore over production.)

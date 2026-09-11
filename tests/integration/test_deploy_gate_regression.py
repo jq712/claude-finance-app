@@ -16,6 +16,7 @@ All `xfail(strict=True)`; delete the marker once fixed, never the test.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -33,6 +34,19 @@ from tests.conftest import role_dsn
 pytestmark = pytest.mark.integration
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
+    compose_file, *args, env=None, **kwargs
+):
+    """Stands in for `run_compose`: every call succeeds, and a `finance
+    selfcheck --json` run (ADR-016 D3 — `ops.status.probe_release`)
+    reports the pinned `RELEASE_ID` as healthy — see the identical helper
+    in tests/integration/test_finops_cli_regression.py."""
+    if "selfcheck" in args:
+        payload = json.dumps({"release_id": (env or {}).get("RELEASE_ID"), "overall": "healthy"})
+        return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
+    return subprocess.CompletedProcess(list(args), 0, "", "")
 
 runner = CliRunner()
 
@@ -91,12 +105,9 @@ def test_deploy_reports_failure_when_the_promotion_lock_is_contended(
     a retry — never a green "deployed".
     """
 
-    def fake_run_compose(compose_file, *args, env=None, runner=None):  # noqa: ANN001, ANN002, ARG001
-        return subprocess.CompletedProcess(list(args), 0, "", "")
-
     import finance_app.cli.finops as finops_module
 
-    monkeypatch.setattr(finops_module, "run_compose", fake_run_compose)
+    monkeypatch.setattr(finops_module, "run_compose", _healthy_selfcheck_run_compose)
 
     # A concurrent `finops deploy` on the same host holds the promotion
     # lock. Released explicitly and the engine disposed in `finally`: a
@@ -133,53 +144,50 @@ def test_deploy_reports_failure_when_the_promotion_lock_is_contended(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-22: deploy_health_check resolves alembic.ini relative to the process CWD, "
-        "which in the `deploy` Compose service is /opt/finance-app (no alembic.ini)."
-    ),
-)
 def test_deploy_health_check_does_not_depend_on_the_process_working_directory(
     tmp_path, monkeypatch
 ) -> None:
-    """`finops deploy` runs inside the `deploy` Compose service, whose
-    `working_dir` is `${FINANCE_APP_DIR:-/opt/finance-app}` —
-    `docs/runbooks/deploy.md` §1.5 populates that directory with `deploy/`
-    only, not `alembic.ini` or `migrations/`.
+    """QA-22, fixed by ADR-016 D3 rather than worked around: the old
+    `deploy_health_check` called `status.migration_status`, which builds
+    `Config("alembic.ini")` from a path relative to the process CWD —
+    inside the `deploy` Compose service that CWD is
+    `${FINANCE_APP_DIR:-/opt/finance-app}`, which `docs/runbooks/deploy.md`
+    §1.5 populates with `deploy/` only, not `alembic.ini`/`migrations/`, so
+    the migration check always came back `"unknown"` and failed the gate
+    on a perfectly healthy release.
 
-    `status.migration_status` builds `Config("alembic.ini")` from the
-    relative path, so from that CWD it cannot resolve the repository head,
-    returns `status="unknown"`, and `deploy_health_check` — which requires
-    `up_to_date` — reports `overall="unhealthy"`. Reproduced against a
-    database that is genuinely at head::
-
-        migration_status(cwd without alembic.ini):
-          {'status': 'unknown', 'applied': 'a1c3e9f4d2b7', 'head': None}
-        deploy_health_check:
-          {'overall': 'unhealthy', 'database': 'healthy',
-           'migrations': 'unknown', 'application': 'healthy'}
-
-    Every `finops deploy` would therefore fail its own health gate and
-    trigger ADR-008's automatic rollback, on a perfectly healthy release.
-    The head revision must come from the packaged application (which does
-    ship `migrations/`), not from whatever directory the process happens
-    to be started in.
+    D3's fix isn't a CWD-independent lookup from the deploy container —
+    that container is pinned to the *previous* release and structurally
+    cannot know the new one's migration head either way (see
+    `deploy_health_check`'s docstring). Instead `deploy_health_check` no
+    longer calls `migration_status` itself at all: it delegates entirely
+    to `probe_release`, a one-shot run of the release image's own `finance
+    selfcheck`, which answers this from inside the only process that
+    actually knows. This test proves the CWD independence directly: it
+    `chdir`s somewhere with no `alembic.ini` and confirms that has zero
+    effect on the result, because nothing in this call path ever reads
+    that file.
     """
     monkeypatch.chdir(tmp_path)
     assert not (tmp_path / "alembic.ini").exists()
 
+    payload = json.dumps({"release_id": "abc1234", "overall": "healthy"})
+
+    def fake_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
+        compose_file, *args, env=None, **kwargs
+    ):
+        return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
+
     with observer_session_scope() as session:
         health = status.deploy_health_check(
             session,
-            run_compose_fn=lambda *a, **k: None,  # noqa: ARG005
+            release_id="abc1234",
+            run_compose_fn=fake_run_compose,
         )
 
-    assert health["migrations"] == "up_to_date", (
-        "the deploy health gate lost track of the migration head purely because of the "
-        f"process working directory: {health}"
+    assert health["overall"] == "healthy", (
+        f"the deploy health gate depends on the process working directory: {health}"
     )
-    assert health["overall"] == "healthy", health
 
 
 @pytest.mark.xfail(

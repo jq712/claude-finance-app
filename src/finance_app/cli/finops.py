@@ -176,17 +176,25 @@ def recent_errors_cmd(
 def restart(
     compose_file: str = typer.Option(DEFAULT_COMPOSE_FILE, "--compose-file"),
 ) -> None:
-    """Restart the `app` container via `docker compose restart app`.
+    """Re-run the deployed release's smoke check via `finance selfcheck`.
 
-    Must run on the host already running the compose stack (the VPS) —
-    this is the narrow, auditable substitute for ad hoc shell/SSH access
-    per ADR-007."""
-    try:
-        run_compose(compose_file, "restart", "app")
-    except ComposeError as exc:
-        console.print(f"[red]restart failed:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    console.print("[green]app restarted[/green]")
+    ADR-016 D2: until Milestone 8's webhook server, there is no
+    long-running `app` container to restart — `app` runs only as a
+    one-shot `docker compose run --rm`, per invocation. This is therefore
+    a liveness re-check of the currently-recorded release, not a process
+    restart; it changes nothing on disk or in `ops.releases`. Must run on
+    the host already running the compose stack (the VPS) — the narrow,
+    auditable substitute for ad hoc shell/SSH access per ADR-007."""
+    with observer_session_scope() as session:
+        release = status.current_release(session)
+    if release is None:
+        console.print("[red]restart failed:[/red] no release is currently recorded")
+        raise typer.Exit(1)
+    result = status.probe_release(release_id=release["release_id"], compose_file=compose_file)
+    if result["status"] != "healthy":
+        console.print(f"[red]restart failed:[/red] {result}")
+        raise typer.Exit(1)
+    console.print(f"[green]{release['release_id']} is healthy[/green]")
 
 
 @app.command()
@@ -230,7 +238,10 @@ def deploy(
         # `app` service must never hold, finding 1), not by overloading
         # `app`'s own definition for a one-shot job.
         run_compose(compose_file, "--profile", "migrate", "run", "--rm", "-T", "migrate", env=env)
-        run_compose(compose_file, "up", "-d", "app", env=env)
+        # No `up -d app` (ADR-016 D2): `app` is a one-shot `--profile app run
+        # --rm` command, not a long-running service, so there is nothing to
+        # bring "up" here. `deploy_health_check` below runs the smoke check
+        # against this exact image via its own one-shot `run --rm`.
     except ComposeError as exc:
         with session_scope() as session:
             release = session.get(Release, release_row_id)
@@ -241,7 +252,10 @@ def deploy(
 
     with observer_session_scope() as obs_session:
         health = status.deploy_health_check(
-            obs_session, compose_file=compose_file, run_compose_fn=run_compose
+            obs_session,
+            release_id=release_id,
+            compose_file=compose_file,
+            run_compose_fn=run_compose,
         )
 
     with session_scope() as session:

@@ -24,8 +24,17 @@ For suspected credential compromise, unexplained financial data corruption, lost
 
 3. **Take a safe snapshot.** An ad hoc backup right now is read-only from the database's perspective (`finance_backup` role — `SELECT` only, per `migrations/versions/0002`), so running one cannot make things worse, and it captures the current (possibly compromised/corrupted) state for later forensic comparison against earlier verified backups:
    ```
-   deploy/scripts/with-production-env.sh deploy/scripts/backup.sh
+   sudo systemd-run --pty --wait --collect --same-dir \
+       --property=LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred \
+       --property=LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred \
+       --property=LoadCredentialEncrypted=backup_encryption_key:/etc/finance-app/credentials/backup_encryption_key.cred \
+       -- /opt/finance-app/deploy/scripts/with-production-env.sh backup -- \
+          /opt/finance-app/deploy/scripts/backup.sh
    ```
+   (`with-production-env.sh` only decrypts credentials inside a systemd
+   unit declaring `LoadCredentialEncrypted=` — a bare SSH shell has no
+   route to that; see `docs/runbooks/deploy.md` §2.5 for the same
+   pattern used by `finops deploy`/`rollback`/`restart`.)
    Note the resulting `backup_run_id` — this snapshot is evidence, not a "known good" restore point; label it as such in the incident report.
 
 4. **If credential compromise is suspected**, do not rotate blindly before evidence is captured — but once steps 2-3 are done, rotating is usually the right next move, since a live compromised credential is an active, ongoing risk while `plaid.*`/financial data corruption is (once snapshotted) not getting worse by itself. `docs/runbooks/deploy.md` §7 covers rotation mechanics. Rotate:
