@@ -21,14 +21,13 @@ RestrictSUIDSGID=true
 
 # Uses finance_app (not finance_observer) — see ops/health.py's module
 # docstring: this unit's `check_health()` writes an ops.errors row on
-# failure, which finance_observer cannot do.
+# failure, which finance_observer cannot do. ADR-016 D1: trimmed to
+# exactly the `health` job's set — no longer decrypts the Plaid
+# production access token, any model provider key, the migrator
+# password, the observer password, or the backup password.
 LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
-LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
-LoadCredentialEncrypted=finance_agent_db_password:/etc/finance-app/credentials/finance_agent_db_password.cred
-LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred
-LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
 EnvironmentFile=-/etc/finance-app/env
 
-ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml run --rm -T app python -m finance_app.ops.health
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh health -- docker compose -f /opt/finance-app/deploy/compose.yaml --profile app run --rm -T app python -m finance_app.ops.health
 
 TimeoutStartSec=120

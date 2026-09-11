@@ -8,7 +8,25 @@
 # (linked to the backup it verified), so `finops backup-status` reflects
 # it. The throwaway container is always removed, success or failure.
 #
-# Invoked by finance-restore-drill.timer (weekly). Safe to run by hand.
+# Invoked by finance-restore-drill.timer (weekly). Safe to run by hand
+# outside systemd too — see the $RUNTIME_DIRECTORY fallback below.
+#
+# ADR-016 D7: the scratch password file used to be staged with a bare
+# `mktemp` (i.e. under `/tmp`) and bind-mounted into the scratch Postgres
+# container by path. `finance-restore-drill.service` sets `PrivateTmp=
+# true`, which namespaces `/tmp`/`/var/tmp` for this script's own
+# processes — but the bind-mount source is resolved by the Docker
+# *daemon*, which runs outside that namespace and cannot see a path
+# under this unit's private `/tmp`. The daemon silently created an empty
+# *directory* there instead of finding the file, so
+# `POSTGRES_PASSWORD_FILE` pointed at a directory, the scratch Postgres
+# never started, and the drill failed every week (QA-25). `systemd`'s
+# `RuntimeDirectory=` is created in the *host* mount namespace (visible
+# to the daemon) and removed automatically when the unit stops — the
+# password file is staged there instead, and the *directory* is what
+# gets bind-mounted (a directory bind mount survives inode replacement;
+# a single-file one does not, which is the other half of what produced
+# this defect).
 set -eu
 
 COMPOSE_FILE="${COMPOSE_FILE:-$(cd "$(dirname "$0")/.." && pwd)/compose.yaml}"
@@ -19,8 +37,35 @@ SCRATCH_CONTAINER="finance-restore-drill-$$"
 SCRATCH_PASSWORD="$(openssl rand -hex 32)"
 NETWORK="${FINANCE_APP_NETWORK:-finance-app}"
 
+# Fail loudly rather than silently falling back to `/tmp` when running
+# under systemd (i.e. $CREDENTIALS_DIRECTORY is set, proving this is a
+# LoadCredentialEncrypted= unit) but $RUNTIME_DIRECTORY is not — that
+# combination means the unit file is missing `RuntimeDirectory=` and
+# this script would otherwise silently reproduce QA-25. A bare `mktemp
+# -d` fallback is kept only for a manual, non-systemd invocation.
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -z "${RUNTIME_DIRECTORY:-}" ]; then
+    echo "restore-verify.sh: running under systemd (\$CREDENTIALS_DIRECTORY is set) but" >&2
+    echo "\$RUNTIME_DIRECTORY is not -- finance-restore-drill.service is missing" >&2
+    echo "RuntimeDirectory=finance-app-restore-drill. Refusing to fall back to /tmp," >&2
+    echo "which the Docker daemon cannot resolve under PrivateTmp=true (ADR-016 D7)." >&2
+    exit 1
+fi
+if [ -n "${RUNTIME_DIRECTORY:-}" ]; then
+    SCRATCH_STAGING_DIR="$RUNTIME_DIRECTORY"
+    _MANUAL_STAGING_DIR=""
+else
+    # Manual, non-systemd invocation only — systemd removes
+    # $RUNTIME_DIRECTORY itself when the unit stops, but a directory
+    # this script created by hand is this script's own to remove.
+    SCRATCH_STAGING_DIR="$(mktemp -d)"
+    _MANUAL_STAGING_DIR="$SCRATCH_STAGING_DIR"
+fi
+
 cleanup() {
     docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
+    if [ -n "$_MANUAL_STAGING_DIR" ]; then
+        rm -rf "$_MANUAL_STAGING_DIR"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -42,18 +87,22 @@ BACKUP_PATH="${LATEST#*	}"
 # POSTGRES_PASSWORD_FILE (not POSTGRES_PASSWORD) so the scratch instance's
 # password isn't sitting in this container's `environment:`/`docker
 # inspect` output for no reason beyond convenience — same argv/env-
-# exposure class as finding 2/QA-16. A private, 0600 temp file, removed
-# once the scratch container has started and read it.
-SCRATCH_PASSWORD_FILE="$(mktemp)"
-chmod 600 "$SCRATCH_PASSWORD_FILE"
+# exposure class as finding 2/QA-16. Staged in $SCRATCH_STAGING_DIR (the
+# unit's RuntimeDirectory=, or a manual mktemp -d — see above), never a
+# bare /tmp file, and the *directory* is bind-mounted, not the file
+# directly (ADR-016 D7) — the Docker daemon resolves that mount source
+# in the host mount namespace, which RuntimeDirectory=/run/<name> is
+# part of and a PrivateTmp=true unit's /tmp is not.
+SCRATCH_PASSWORD_FILE="$SCRATCH_STAGING_DIR/scratch_password"
 printf '%s' "$SCRATCH_PASSWORD" > "$SCRATCH_PASSWORD_FILE"
+chmod 600 "$SCRATCH_PASSWORD_FILE"
 
 docker run -d --name "$SCRATCH_CONTAINER" \
     --network "$NETWORK" \
     -e POSTGRES_USER=finance_migrator \
-    -e POSTGRES_PASSWORD_FILE=/run/secrets/scratch_password \
+    -e POSTGRES_PASSWORD_FILE=/run/scratch/scratch_password \
     -e POSTGRES_DB=finance_restore_drill \
-    -v "$SCRATCH_PASSWORD_FILE:/run/secrets/scratch_password:ro" \
+    -v "$SCRATCH_STAGING_DIR:/run/scratch:ro" \
     postgres:17-alpine >/dev/null
 rm -f "$SCRATCH_PASSWORD_FILE"
 
