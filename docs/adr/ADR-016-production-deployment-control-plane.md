@@ -155,11 +155,14 @@ Two parts, because CWD was only half the problem.
 # src/finance_app/db/alembic_config.py
 class PackagedMigrationsUnavailableError(RuntimeError): ...
 
+
 def packaged_alembic_config() -> alembic.config.Config:
     """script_location = importlib.resources.files("finance_app") / "migrations"."""
 
+
 def packaged_head_revision() -> str:
     """Raises PackagedMigrationsUnavailableError rather than returning None."""
+
 
 # src/finance_app/db/migrate.py
 def upgrade_to_head() -> str:
@@ -181,8 +184,11 @@ The dangerous window is not two promotions racing; it is **two deploys racing to
 
 ```python
 # src/finance_app/ops/release.py
-class DeployInProgressError(RuntimeError): ...   # another deploy/rollback holds the lock
-class DeployLockLostError(RuntimeError): ...     # we held it and no longer do
+class DeployInProgressError(RuntimeError): ...  # another deploy/rollback holds the lock
+
+
+class DeployLockLostError(RuntimeError): ...  # we held it and no longer do
+
 
 @contextmanager
 def deploy_lock(engine: Engine) -> Iterator[Connection]:
@@ -191,6 +197,7 @@ def deploy_lock(engine: Engine) -> Iterator[Connection]:
     immediately if not acquired. Released when the connection closes —
     including when the process is killed, which is why this is a session
     lock (pg_try_advisory_lock) and not a transaction lock."""
+
 
 def assert_lock_held(conn: Connection) -> None:
     """Re-verify via pg_locks against pg_backend_pid(); raise
