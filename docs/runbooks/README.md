@@ -11,6 +11,7 @@ Written:
 | [`restore-backup.md`](restore-backup.md) — restore into a scratch instance and verify, plus full disaster recovery | 7 |
 | [`failed-sync.md`](failed-sync.md) — diagnosing a failed or stalled sync via `finops` | 7 |
 | [`incident-class-c.md`](incident-class-c.md) — evidence preservation and escalation | 7 (brought forward from 9 — Milestone 7's backup/incident work made this concrete sooner than planned) |
+| [`autonomous-continuation.md`](autonomous-continuation.md) — what an unattended autonomous-continuation session does, and what to review after a run | 7 (brought forward from 9 — see ADR-017) |
 
 Planned (created with the milestone that makes them real):
 

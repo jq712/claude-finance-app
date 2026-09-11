@@ -62,9 +62,11 @@ The runtime financial agent gets **semantic, parameterized tools** only — `get
 
 ## Risk classes (see handoff §25)
 
-- **Class A** — lint, formatting, clear test regressions, logging, patch deps. Fix and ship through normal gates.
-- **Class B** — migrations, Plaid sync semantics, financial math, credentials, webhook security, agent permissions. Requires implementation + specialist review + adversarial tests + security review + staging before production.
+- **Class A** — lint, formatting, clear test regressions, logging, patch deps. Fix and merge through normal gates (CI required-green — never bypassed). Merge is not deploy: production deploy is always an owner-performed `finops deploy`, for every class, with no exception for Class A.
+- **Class B** — migrations, Plaid sync semantics, financial math, credentials, webhook security, agent permissions. Requires implementation + specialist review + adversarial tests + security review + staging before production. Autonomous continuation implements and opens the PR, then stops and waits for the user to merge — never auto-merged.
 - **Class C** — suspected credential compromise, data corruption, lost source-of-truth records, failed restores. **Stop destructive automation. Preserve evidence. Write an incident report. Escalate to the owner.** Refusing an unsafe mutation is the correct autonomous action.
+
+Class A auto-merge is the standing default whenever a session is asked to continue the milestone backlog autonomously (handoff §34) — interactive, resumed, or scheduled makes no difference. Full contract, including what to do when nobody is present to answer a blocker: ADR-017 and handoff §32.
 
 ## Delegation
 
@@ -81,7 +83,7 @@ Use the subagents in `.claude/agents/` for their specialties. Never let the suba
 
 ## Definition of done
 
-Implementation · types/lint clean · unit tests · integration tests · migration if schema changed · agent eval if prompts or tools changed · docs updated if behavior changed · runbook updated if operations changed · CI green · no new secrets · clear rollback path.
+Implementation · types/lint clean · unit tests · integration tests · migration if schema changed · agent eval if prompts or tools changed · docs updated if behavior changed · runbook updated if operations changed · **`README.md`'s Status line updated if this PR completes or begins a milestone** (CI's `docs-freshness` job checks this mechanically for milestone-titled/milestone-branched PRs — it has gone stale before, don't rely on memory) · CI green · no new secrets · clear rollback path.
 
 ## Commands
 

@@ -99,7 +99,7 @@ Class B work requires implementation, then independent specialist review, then a
 
 ## Incident classes
 
-**Class A** — lint, formatting, clear test regressions, logging, patch dependencies. Autonomous repair through normal gates.
+**Class A** — lint, formatting, clear test regressions, logging, patch dependencies. Autonomous repair and merge through normal gates (CI required-green). Merge is not deploy — production deploy is always an owner-performed `finops deploy` regardless of class; see `docs/deployment.md`'s release sequence and ADR-017.
 
 **Class B** — migrations, sync semantics, financial math, credential handling, webhook security, agent permissions. Autonomous, but with full independent review gates before production.
 

@@ -1226,7 +1226,7 @@ Critical evals must run before production changes to prompts, tools, or model co
 
 Maximum autonomy does **not** mean every incident should trigger an automatic write.
 
-### Class A — autonomous repair/deploy
+### Class A — autonomous repair/merge
 
 Examples:
 
@@ -1238,7 +1238,17 @@ Examples:
 - patch dependency update;
 - clearly non-breaking maintenance.
 
-Agent may diagnose, patch, review, merge, and deploy after normal gates.
+Agent may diagnose, patch, review, and merge to `main` autonomously once required CI checks
+are green — never by bypassing or weakening a check. This is the standing default whenever a
+session is asked to continue the milestone backlog autonomously (§34), regardless of whether
+that session is interactive, resumed, or started by a scheduled routine — see ADR-017.
+
+Merge is not deploy. Production deploy is always an owner-performed `finops deploy` on the
+VPS, for every risk class without exception, per §19's release sequence and
+`docs/deployment.md` — CI green and a merged PR authorize a release to *exist*, never to reach
+production unattended. This holds independent of Milestone 9: autonomous production deployment
+does not exist until that milestone defines its own rollback criteria, and Class A autonomy
+never implies it in the meantime.
 
 ### Class B — autonomous with stronger independent gates
 
@@ -1628,6 +1638,11 @@ Required where applicable:
 - agent eval if prompts/tools changed;
 - docs update if behavior/architecture changed;
 - runbook update if operations changed;
+- **`README.md`'s Status line reflects reality if this PR completes or begins a milestone** —
+  not just "docs updated" in general; this line specifically has gone stale in the past
+  (CI enforces this mechanically for milestone-titled/milestone-branched PRs, see
+  `.github/workflows/ci.yml`'s `docs-freshness` job, but the rule holds regardless of whether
+  a given PR happens to trip that heuristic);
 - clean CI;
 - no new untracked secrets;
 - clear rollback path for production-impacting work.
@@ -1655,6 +1670,18 @@ Escalate only for decisions such as:
 - two materially different user-facing product choices cannot be resolved from this document.
 
 When blocked, continue all independent work first, then ask one concise question with a recommended default.
+
+### No one present to answer
+
+The list above assumes a human is there to answer and wait for. That assumption does not hold
+for a session running autonomous continuation (§34) with nobody actively watching — a
+scheduled routine, or an interactive session the user has stepped away from. In that mode, on
+hitting any item from the list above (or a Class C condition), do not idle waiting for a
+response and do not guess: stop the current unit of work cleanly, leave a durable note
+explaining exactly what's blocked and the recommended default (a PR description, a commit
+message, or a GitHub issue — whichever fits what was in progress), and end the session. Never
+retry a blocked action in a loop hoping the blocker resolves itself. All other independent,
+unblocked work should still be finished first, same as the interactive case.
 
 ### Verify unstable technical details
 
