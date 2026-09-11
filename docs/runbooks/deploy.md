@@ -54,8 +54,9 @@ credentials inside a systemd unit that declares `LoadCredentialEncrypted=`
 (that's what `$CREDENTIALS_DIRECTORY` requires) — a bare interactive SSH
 shell has no route to that TPM/machine-key-bound decryption. Every command
 below that pipes through `with-production-env.sh` therefore runs via
-`systemd-run`, which creates a transient unit with the same credential set
-as `finance-app.service` for the duration of one command:
+`systemd-run`, which creates a transient unit with its own credential set
+(the `deploy` job's — see below, **not** `finance-app.service`'s) for the
+duration of one command:
 
 ```
 finops_run() {
@@ -73,8 +74,10 @@ runbook calls it as `finops_run deploy <sha>` / `finops_run rollback` /
 `finops_run restart`. The three `--property=LoadCredentialEncrypted=...`
 flags are ADR-016 D1's `deploy` job's credential set — deliberately **not**
 derived from `finance-app.service`, which under D1 holds only
-`finance_app_db_password` (the `app` job's own, much narrower, set) and so
-can no longer stand in for `deploy`'s. Unlike `with-production-env.sh`'s
+`finance_migrator_db_password` (job `postgres` — that unit's bare `docker
+compose up -d`/`down` brings up only the un-profiled `postgres` service,
+which needs nothing else) and so can no longer stand in for `deploy`'s
+three-credential set. Unlike `with-production-env.sh`'s
 own job matrix — which `tests/unit/test_deploy_topology_regression.py`'s
 drift test keeps mechanically in sync with `deploy/compose.yaml` — this
 list is plain prose and must be updated by hand if that matrix's `deploy`

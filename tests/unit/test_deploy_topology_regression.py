@@ -68,17 +68,22 @@ _CREDENTIAL_FILES = {
 
 # job -> compose service it maps to 1:1 for credential purposes. `app` is
 # handled separately (its provider key is either/or, not fixed); `health`
-# and `restore-drill` are deliberately excluded — `health` runs the `app`
-# service but is a documented, narrower subset of its credential needs
-# (ops/health.py never touches AGENT_DATABASE_URL or a provider key, so
-# those interpolating empty is harmless), and `restore-drill` has no
-# compose service of its own (a bare `docker run`, not `docker compose
-# run` — see restore-verify.sh).
+# is deliberately excluded — it runs the `app` service but is a
+# documented, narrower subset of its credential needs (ops/health.py
+# never touches AGENT_DATABASE_URL or a provider key, so those
+# interpolating empty is harmless). `restore-drill` maps to `backup`:
+# restore-verify.sh's own `docker compose` calls all target
+# `--profile backup run --rm backup` (the scratch Postgres it also starts
+# is a *bare* `docker run`, entirely outside Compose, which is the only
+# part of this job with no compose service of its own) — the drift test
+# previously excluded `restore-drill` on the mistaken assumption that none
+# of it went through Compose.
 _JOB_TO_SERVICE = {
     "postgres": "postgres",
     "migrate": "migrate",
     "sync": "sync",
     "backup": "backup",
+    "restore-drill": "backup",
     "finops": "finops",
     "deploy": "deploy",
 }
@@ -222,7 +227,18 @@ def test_deploy_job_excludes_plaid_backup_and_provider_credentials() -> None:
     Context argues that boundary is defense-in-depth, not a containment
     guarantee, but it's still worth keeping honest: it must never hold the
     Plaid production access token, the backup encryption key, or a model
-    provider key."""
+    provider key.
+
+    `FINANCE_AGENT_DB_PASSWORD` is included deliberately, not just for
+    symmetry: `probe_release` runs `docker compose --profile app run --rm
+    app finance selfcheck` *from inside this job's own process*, so
+    Compose interpolates the `app` service block against this same
+    environment — this pins that `deploy` deliberately leaves
+    `FINANCE_AGENT_DB_PASSWORD`/the provider key unresolved there rather
+    than growing this job's set to cover a service it merely invokes.
+    `finance selfcheck` never touches `AGENT_DATABASE_URL` or a provider
+    key (`src/finance_app/ops/selfcheck.py`), so this is safe as long as
+    that stays true."""
     exported = _wrapper_exports("deploy")
     forbidden = {
         "PLAID_CLIENT_ID",
@@ -232,6 +248,7 @@ def test_deploy_job_excludes_plaid_backup_and_provider_credentials() -> None:
         "BACKUP_ENCRYPTION_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "FINANCE_AGENT_DB_PASSWORD",
     }
     leaked = exported & forbidden
     assert not leaked, f"job 'deploy' exported {leaked}, which it must never hold"
@@ -293,6 +310,30 @@ def test_wrapper_rejects_a_credential_containing_an_embedded_newline() -> None:
         assert result.returncode != 0
         assert "attacker-supplied" not in result.stdout
         assert "embedded newline" in result.stderr
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_wrapper_rejects_a_credential_containing_a_carriage_return() -> None:
+    """CRLF line endings (a Windows-side credential source, an editor, a
+    paste path) aren't caught by the embedded-newline check — `wc -l`
+    still sees one line — but silently corrupt the value just the same:
+    a `BACKUP_ENCRYPTION_KEY` ending in `\\r` would encrypt backups under
+    a passphrase that differs from whatever was recorded out-of-band,
+    discovered only at restore time."""
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("app\rpw")
+        env = {**os.environ, "CREDENTIALS_DIRECTORY": tmp_dir}
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "health", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode != 0
+        assert "carriage return" in result.stderr
     finally:
         shutil.rmtree(tmp_dir)
 
@@ -435,12 +476,24 @@ def test_restore_verify_refuses_to_fall_back_to_tmp_under_systemd() -> None:
     """If `$CREDENTIALS_DIRECTORY` is set (i.e. running under the systemd
     unit) but `$RUNTIME_DIRECTORY` is not, the script must refuse rather
     than silently falling back to a bare `mktemp -d` under `/tmp` — that
-    fallback is exactly what reproduced QA-25 under `PrivateTmp=true`."""
-    script = _RESTORE_VERIFY_SCRIPT.read_text()
-    assert "RUNTIME_DIRECTORY" in script, (
-        "restore-verify.sh no longer references $RUNTIME_DIRECTORY at all"
+    fallback is exactly what reproduced QA-25 under `PrivateTmp=true`.
+
+    Actually executes the script up to that check (it runs before any
+    Docker/network access, so no daemon is needed) rather than only
+    grepping for the guard's source text — a grep-only version of this
+    test would stay green even if the `if` condition itself were wrong or
+    silently short-circuited."""
+    result = subprocess.run(
+        ["/bin/sh", str(_RESTORE_VERIFY_SCRIPT)],
+        env={**os.environ, "CREDENTIALS_DIRECTORY": "/does/not/matter"},
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
-    assert not re.search(r'-v\s+"\$SCRATCH_PASSWORD_FILE:', script), (
+    assert result.returncode == 1
+    assert "Refusing to fall back to /tmp" in result.stderr
+
+    assert not re.search(r'-v\s+"\$SCRATCH_PASSWORD_FILE:', _RESTORE_VERIFY_SCRIPT.read_text()), (
         "restore-verify.sh bind-mounts a single mktemp *file* again — D7 requires "
         "bind-mounting the *directory* the Docker daemon can actually resolve"
     )
@@ -478,6 +531,35 @@ def test_probe_release_reports_healthy_when_the_right_release_selfchecks_clean()
 
     result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
     assert result["status"] == "healthy"
+    assert result["reported_release_id"] == "abc1234"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        json.dumps({"release_id": "abc1234", "overall": "healthy"}) + "\n",
+        "Creating network...\n" + json.dumps({"release_id": "abc1234", "overall": "healthy"}),
+        json.dumps({"release_id": "abc1234", "overall": "healthy"})
+        + "\nContainer app-run-1  Removed\n",
+        json.dumps({"release_id": "abc1234", "overall": "healthy"})
+        + '\n{"level": "info", "msg": "done"}\n',
+    ],
+    ids=["clean", "leading-chatter", "trailing-chatter", "trailing-unrelated-json"],
+)
+def test_probe_release_finds_the_payload_around_surrounding_noise(stdout: str) -> None:
+    """`_parse_selfcheck_stdout` must not stop at the first line (scanning
+    from the end) that fails to parse or isn't the selfcheck payload — a
+    version that does would misreport a genuinely healthy release as
+    `unreachable` (from Compose startup/teardown chatter) or `wrong_image`
+    (from an unrelated JSON object elsewhere in the stream), which
+    `deploy_health_check` would then auto-rollback (ADR-008) — exactly
+    the QA-2 failure class the surrounding code exists to prevent."""
+
+    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess([], 0, stdout, "")
+
+    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
+    assert result["status"] == "healthy", result
     assert result["reported_release_id"] == "abc1234"
 
 

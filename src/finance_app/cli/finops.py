@@ -54,6 +54,15 @@ _RELEASE_ID_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _MAX_RECENT_ERRORS_LIMIT = 10_000
 
 
+class RollbackTargetUnhealthyError(RuntimeError):
+    """`_do_rollback`'s target release failed its own `probe_release` check.
+    Raised instead of silently promoting it — ADR-016 D2 removed the
+    `up -d app` step this used to run, which never actually verified
+    anything (it only started a one-shot container that printed `finance
+    --help` and exited), so a rollback used to report success regardless
+    of whether the target release could actually run."""
+
+
 def _emit(data: dict | list, *, as_json: bool, title: str) -> None:
     """Renders `data` as a Rich table for interactive use (or raw JSON for
     `--json`). Every non-JSON value is wrapped in `rich.text.Text` rather
@@ -282,6 +291,12 @@ def deploy(
             "required.[/red]"
         )
         raise typer.Exit(1) from None
+    except RollbackTargetUnhealthyError as exc:
+        console.print(
+            f"[red]automatic rollback target is also unhealthy ({exc}) — manual "
+            "intervention required.[/red]"
+        )
+        raise typer.Exit(1) from None
     raise typer.Exit(1)
 
 
@@ -292,26 +307,38 @@ def rollback(
     """Roll back to the previously deployed known-good release (ADR-008).
 
     No image build, no registry fetch beyond what's already local — just
-    bringing the stack up under the previous release's tag."""
+    confirming the previous release's image still selfchecks healthy and
+    flipping `ops.releases` bookkeeping back to it."""
     try:
         released_id = _do_rollback(compose_file)
     except release_ops.NoPreviousReleaseError as exc:
         console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except RollbackTargetUnhealthyError as exc:
+        console.print(f"[red]rollback target is not healthy:[/red] {exc}")
         raise typer.Exit(1) from exc
     console.print(f"[green]rolled back to {released_id}[/green]")
 
 
 def _do_rollback(compose_file: str) -> str:
     """Shared rollback mechanics for `deploy`'s auto-rollback path and the
-    `rollback` command. Returns the release id now running."""
+    `rollback` command. Returns the release id now current.
+
+    ADR-016 D2: there is no long-running `app` process to bring back up —
+    the previous `up -d app` step here started a one-shot container that
+    printed `finance --help` and exited, verifying nothing. This instead
+    runs `probe_release` against the rollback target before touching any
+    bookkeeping, so a target that is itself broken (e.g. a schema drift
+    the forward migration introduced) is never silently promoted."""
     with session_scope() as session:
         previous = release_ops.get_previous(session)
         if previous is None:
             raise release_ops.NoPreviousReleaseError("No previous known-good release is tracked.")
         target_release_id = previous.release_id
 
-    env = {"RELEASE_ID": target_release_id}
-    run_compose(compose_file, "up", "-d", "app", env=env)
+    health = status.probe_release(release_id=target_release_id, compose_file=compose_file)
+    if health["status"] != "healthy":
+        raise RollbackTargetUnhealthyError(f"{target_release_id}: {health}")
 
     with session_scope() as session:
         release_ops.rollback(session)

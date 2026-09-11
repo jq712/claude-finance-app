@@ -284,12 +284,20 @@ def _application_liveness() -> str:
 
 
 def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
-    """The last non-blank line of `finance selfcheck --json`'s stdout,
-    parsed as a JSON object — or `None` if there isn't one. Reads from the
-    end because `docker compose run` can interleave startup chatter (pull
-    progress, container-creation notices) ahead of the command's own
-    output on some Compose versions; the selfcheck payload is always the
-    final line `finance selfcheck --json` prints."""
+    """The last line of `finance selfcheck --json`'s stdout that looks
+    like its actual payload — a JSON object carrying both `release_id`
+    and `overall` — or `None` if there isn't one.
+
+    Scans from the end and keeps going past any line that doesn't fit,
+    rather than stopping at the first one: `docker compose run` can
+    interleave startup chatter (pull progress, container-creation
+    notices) *after* the command's own output on some Compose versions,
+    and nothing rules out an unrelated JSON object (a structured log line,
+    once `configure_logging` is ever wired to stdout) elsewhere in the
+    stream. Requiring both sentinel keys, rather than accepting the first
+    parseable dict, keeps such a line from being misread as the selfcheck
+    payload and reported as `wrong_image` or `unreachable` for a release
+    that is actually fine."""
     for line in reversed(stdout.splitlines()):
         line = line.strip()
         if not line:
@@ -297,8 +305,9 @@ def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(line)
         except ValueError:
-            return None
-        return payload if isinstance(payload, dict) else None
+            continue
+        if isinstance(payload, dict) and "release_id" in payload and "overall" in payload:
+            return payload
     return None
 
 

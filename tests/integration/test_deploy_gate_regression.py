@@ -191,6 +191,44 @@ def test_deploy_health_check_does_not_depend_on_the_process_working_directory(
     )
 
 
+def test_rollback_refuses_to_promote_a_target_that_fails_its_own_selfcheck(
+    two_healthy_releases, monkeypatch
+) -> None:
+    """`_do_rollback` used to `docker compose up -d app` and then
+    unconditionally promote the rollback target — under ADR-016 D2 that
+    starts a one-shot container that prints `finance --help` and exits,
+    verifying nothing, so a rollback target that is itself broken (e.g. a
+    schema drift the forward migration introduced) would have been
+    silently promoted to `current` anyway. It must instead run
+    `probe_release` against the target and refuse to touch bookkeeping if
+    that fails."""
+    import finance_app.cli.finops as finops_module
+
+    def unhealthy_run_compose(compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+        if "selfcheck" in args:
+            payload = json.dumps(
+                {"release_id": (env or {}).get("RELEASE_ID"), "overall": "unhealthy"}
+            )
+            return subprocess.CompletedProcess(list(args), 1, payload + "\n", "")
+        return subprocess.CompletedProcess(list(args), 0, "", "")
+
+    monkeypatch.setattr(finops_module, "run_compose", unhealthy_run_compose)
+
+    result = runner.invoke(finops_module.app, ["rollback"])
+
+    engine = two_healthy_releases
+    with engine.begin() as conn:
+        statuses = dict(
+            conn.execute(text("SELECT release_id, status FROM ops.releases")).all()  # type: ignore[arg-type]
+        )
+
+    assert result.exit_code != 0, "rollback reported success against an unhealthy target"
+    assert statuses["b" * 7] == "current", (
+        f"rollback promoted an unhealthy target instead of leaving current alone: {statuses}"
+    )
+    assert statuses["a" * 7] == "previous"
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(

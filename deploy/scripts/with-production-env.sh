@@ -135,6 +135,16 @@ _required_for_job() {
         finops) echo "FINANCE_OBSERVER_DB_PASSWORD" ;;
         health) echo "FINANCE_APP_DB_PASSWORD" ;;
         deploy)
+            # `probe_release` also drives `docker compose --profile app run
+            # --rm app finance selfcheck` *from inside this job's own
+            # process* — Compose interpolates the `app` service block
+            # against this environment too, so `FINANCE_AGENT_DB_PASSWORD`
+            # and the active provider key resolve empty there. Same
+            # documented, harmless gap as the `health` job below:
+            # `finance selfcheck` never touches AGENT_DATABASE_URL or a
+            # provider key (src/finance_app/ops/selfcheck.py). Do not
+            # "fix" this by adding those to this set — the whole point of
+            # D1 is that `deploy` never holds a provider key.
             echo "FINANCE_MIGRATOR_DB_PASSWORD FINANCE_APP_DB_PASSWORD FINANCE_OBSERVER_DB_PASSWORD"
             ;;
         postgres) echo "FINANCE_MIGRATOR_DB_PASSWORD" ;;
@@ -203,6 +213,18 @@ for pair in $(_credential_names); do
         echo "with-production-env.sh: credential '$name' (job '$JOB') contains an embedded newline — refusing to export it" >&2
         exit 1
     fi
+    # A stray carriage return (CRLF line endings from a Windows-side
+    # credential source, an editor, a paste path) is not caught by the
+    # newline check above — `wc -l` still sees one line — but it silently
+    # corrupts the value just the same (a `BACKUP_ENCRYPTION_KEY` ending
+    # in \r would encrypt backups under a passphrase that differs from
+    # whatever was recorded out-of-band, discovered only at restore time).
+    case "$value" in
+        *"$(printf '\r')"*)
+            echo "with-production-env.sh: credential '$name' (job '$JOB') contains a carriage return — refusing to export it" >&2
+            exit 1
+            ;;
+    esac
     export "$env_var=$value"
 done
 

@@ -38,7 +38,7 @@ cd /opt/finance-app
 backup_run deploy/scripts/restore.sh <backup-path> <target-database-url>
 ```
 
-- `<backup-path>` — an absolute path *as seen inside the app container*, i.e. under `/var/lib/finance-app/backups/...` (the mounted backup volume). List available backups: `docker compose -f deploy/compose.yaml run --rm app ls -la /var/lib/finance-app/backups`.
+- `<backup-path>` — an absolute path *as seen inside the container*, i.e. under `/var/lib/finance-app/backups/...` (the mounted backup volume — only the `backup` service has it, not `app`). List available backups: `backup_run docker compose -f deploy/compose.yaml --profile backup run --rm backup ls -la /var/lib/finance-app/backups`.
 - `<target-database-url>` — a SQLAlchemy-style URL for a **scratch** database, e.g. a throwaway `postgres:17-alpine` container on the `finance-app` Docker network (exactly what `deploy/scripts/restore-verify.sh` automates — read that script for the pattern if you're doing this by hand).
 
 `pg_restore --clean --if-exists` drops existing objects in the target before restoring, so double-check `<target-database-url>` is not production before running this.
@@ -46,11 +46,11 @@ backup_run deploy/scripts/restore.sh <backup-path> <target-database-url>
 After restoring, run the same sanity checks the weekly drill runs:
 
 ```
-backup_run docker compose -f deploy/compose.yaml --profile app run --rm -T app \
+backup_run docker compose -f deploy/compose.yaml --profile backup run --rm -T backup \
     python -m finance_app.ops.backup verify <backup-run-id> --target-url <target-database-url>
 ```
 
-`<backup-run-id>` is printed by `docker compose ... run --rm app python -m finance_app.ops.backup latest`, or found via `finops backup-status`.
+`<backup-run-id>` is printed by `docker compose ... --profile backup run --rm backup python -m finance_app.ops.backup latest`, or found via `finops backup-status`.
 
 ## Full disaster recovery (restoring over production — rare, deliberate, high-stakes)
 
@@ -61,15 +61,16 @@ This is not a `finops` one-liner on purpose — it is the one operation in this 
    sudo systemctl stop finance-app.service
    ```
 2. Confirm which backup you're restoring and why (`finops backup-status`, and the incident record if this follows an incident).
-3. Restore directly into the running `postgres` service's `finance` database — the one case where the target is *not* a scratch database. Set `$TARGET_DATABASE_URL` rather than passing it positionally — a positional argument lands in shell history the moment it's typed (finding 2):
+3. Restore directly into the running `postgres` service's `finance` database — the one case where the target is *not* a scratch database. Set `$TARGET_DATABASE_URL` rather than passing it positionally (a positional argument lands in shell history the moment it's typed — finding 2) — and read the password *inside* the `backup_run` invocation, not before it: `systemd-run` starts the transient unit with a clean environment, so an `export` done in this shell first would not be visible to the command `backup_run` execs, and `--setenv=` would put the real production password into `systemctl show` unit properties, the very exposure `$TARGET_DATABASE_URL` exists to avoid. `--pty` gives the transient unit a real terminal, so the prompt still works from inside it:
    ```
-   read -rs -p "finance_migrator password: " FINANCE_MIGRATOR_DB_PASSWORD; echo
-   export TARGET_DATABASE_URL="postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD}@postgres:5432/finance"
-   unset FINANCE_MIGRATOR_DB_PASSWORD
-   backup_run deploy/scripts/restore.sh <backup-path> "" <backup-run-id>
-   unset TARGET_DATABASE_URL
+   backup_run sh -c '
+       read -rs -p "finance_migrator password: " FINANCE_MIGRATOR_DB_PASSWORD; echo
+       export TARGET_DATABASE_URL="postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD}@postgres:5432/finance"
+       unset FINANCE_MIGRATOR_DB_PASSWORD
+       exec deploy/scripts/restore.sh "$1" "" "$2"
+   ' _ <backup-path> <backup-run-id>
    ```
-   (`<backup-run-id>` — from `docker compose ... run --rm app python -m finance_app.ops.backup latest` or `finops backup-status` — is optional but strongly recommended here: it verifies the artifact's recorded sha256 before decrypting, the one channel that would otherwise let a substituted or corrupted-in-place backup silently restore over production.)
+   (`<backup-run-id>` — from `docker compose ... --profile backup run --rm backup python -m finance_app.ops.backup latest` or `finops backup-status` — is optional but strongly recommended here: it verifies the artifact's recorded sha256 before decrypting, the one channel that would otherwise let a substituted or corrupted-in-place backup silently restore over production.)
 4. Run the sanity checks (previous section) against the now-restored `finance` database.
 5. Confirm `finops migration-status` reports `up_to_date` — a backup taken before a since-applied migration will need `alembic upgrade head` run afterward.
 6. Restart the application:

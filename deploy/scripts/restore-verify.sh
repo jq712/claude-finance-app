@@ -63,6 +63,13 @@ fi
 
 cleanup() {
     docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
+    # Not just belt-and-suspenders for the normal path (which already
+    # removes this once the scratch instance is ready) — also the only
+    # thing that removes it if the script exits early (readiness timeout,
+    # INT/TERM) before that point is ever reached. `RuntimeDirectory=`
+    # teardown handles this on the systemd path regardless, but this
+    # shouldn't depend on that.
+    rm -f "${SCRATCH_PASSWORD_FILE:-}"
     if [ -n "$_MANUAL_STAGING_DIR" ]; then
         rm -rf "$_MANUAL_STAGING_DIR"
     fi

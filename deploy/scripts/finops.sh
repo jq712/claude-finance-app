@@ -8,13 +8,13 @@
 #
 # Usage: finops.sh deploy <sha> | finops.sh rollback | finops.sh restart
 #
-# Run this through with-production-env.sh so the credentials the `deploy`
-# service's compose.yaml interpolation requires (FINANCE_APP_DB_PASSWORD,
-# FINANCE_OBSERVER_DB_PASSWORD — and, because Compose interpolates the
-# whole file regardless of which service is selected, every other
-# `${VAR:?required}` in compose.yaml too) are present:
+# Run this through with-production-env.sh's `deploy` job (ADR-016 D1 —
+# every `${VAR:?required}` in compose.yaml became `${VAR:-}`; the wrapper
+# is what actually enforces the `deploy` service's three-credential
+# requirement now: FINANCE_MIGRATOR_DB_PASSWORD, FINANCE_APP_DB_PASSWORD,
+# FINANCE_OBSERVER_DB_PASSWORD):
 #
-#   with-production-env.sh finops.sh deploy <sha>
+#   with-production-env.sh deploy -- finops.sh deploy <sha>
 set -eu
 
 COMPOSE_FILE="${COMPOSE_FILE:-$(cd "$(dirname "$0")/.." && pwd)/compose.yaml}"

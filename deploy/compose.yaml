@@ -17,8 +17,7 @@
 #              belong to `sync` only).
 #   postgres   PostgreSQL 17, matching the pinned pg_dump/pg_restore client
 #              baked into the app image (Dockerfile)
-#   migrate    one-shot `python -m finance_app.db.migrate upgrade`,
-#              `finance_migrator`-only.
+#   migrate    one-shot `alembic upgrade head`, `finance_migrator`-only.
 #   sync       one-shot `finance sync` (the daily Plaid transaction sync),
 #              `finance_app` + Plaid API credentials only.
 #   backup     one-shot `python -m finance_app.ops.backup ...`
@@ -139,12 +138,17 @@ services:
     expose: []
 
   migrate:
-    # One-shot `alembic upgrade head` (via `finance_app.db.migrate`, which
-    # resolves migrations from the installed package rather than the
-    # process CWD — ADR-016 D4) — the migration-preflight step `finops
-    # deploy` runs before bringing `app` up under a new image (docs/
-    # deployment.md, ADR-008). `finance_migrator` only: full DDL authority
-    # the `app` service must never hold.
+    # One-shot `alembic upgrade head` — the migration-preflight step
+    # `finops deploy` runs before bringing `app` up under a new image
+    # (docs/deployment.md, ADR-008). `finance_migrator` only: full DDL
+    # authority the `app` service must never hold. Resolves migrations via
+    # the repo-root `alembic.ini` (copied into the image at the same fixed
+    # `WORKDIR /app` every service uses — see Dockerfile), *not* via a
+    # packaged `finance_app.db.migrate` entrypoint: that module, and the
+    # `migrations/` → `src/finance_app/migrations/` move it implies, is
+    # ADR-016 D4, deliberately out of scope for D1/D2/D7/D8 (this PR). Do
+    # not point this at `finance_app.db.migrate` until D4 actually ships
+    # that module — it does not exist yet.
     image: ${CONTAINER_IMAGE_REPO:-ghcr.io/jq712/claude-finance-app}:${RELEASE_ID:-latest}
     profiles: ["migrate"]
     depends_on:
@@ -152,7 +156,7 @@ services:
         condition: service_healthy
     environment:
       ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:${FINANCE_MIGRATOR_DB_PASSWORD:-}@postgres:5432/finance
-    command: ["python", "-m", "finance_app.db.migrate", "upgrade"]
+    command: ["alembic", "upgrade", "head"]
 
   sync:
     # One-shot daily Plaid transaction sync (ADR-011, ADR-012). Needs
