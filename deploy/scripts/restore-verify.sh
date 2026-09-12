@@ -74,7 +74,25 @@ cleanup() {
         rm -rf "$_MANUAL_STAGING_DIR"
     fi
 }
-trap cleanup EXIT INT TERM
+# A bare `trap cleanup EXIT INT TERM` runs `cleanup` on INT/TERM and then
+# *returns* — the shell resumes wherever it was interrupted (e.g. the
+# `pg_isready` readiness loop) and runs to its own conclusion, driving
+# `docker`/re-creating the password file against resources `cleanup` just
+# destroyed, and the exit status systemd/journald sees ends up being
+# whatever that resumed run produces instead of "killed by signal" — the
+# weekly drill's failure is misattributed during exactly the incident
+# where it matters (QA-39). `EXIT` needs no exit code of its own (the
+# shell's natural exit code is already correct there); INT/TERM must stop
+# the script, not just tidy up after it — 128+signal, per convention (130
+# for INT/SIGINT, 143 for TERM/SIGTERM).
+# `trap - EXIT INT TERM` first, in the same handler: without it, `exit
+# 130`/`exit 143` below would still trigger the EXIT trap on the way out
+# and run `cleanup` a second time — harmless in itself (cleanup is
+# idempotent), but it duplicates the `docker rm -f`/journal noise the
+# EXIT trap is supposed to be the *only* source of on a normal exit.
+trap cleanup EXIT
+trap 'trap - EXIT INT TERM; cleanup; exit 130' INT
+trap 'trap - EXIT INT TERM; cleanup; exit 143' TERM
 
 # `set -e` alone does NOT abort a `VAR="$(cmd)"` assignment before this
 # `if` gets a chance to run its own error message (QA-18) — the explicit

@@ -82,7 +82,15 @@ def _selfcheck_stub(overall: str):  # noqa: ANN202
     def fake(compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
         calls.append(args)
         if "selfcheck" in args:
-            payload = json.dumps({"release_id": (env or {}).get("RELEASE_ID"), "overall": overall})
+            reported = (env or {}).get("RELEASE_ID")
+            # `image_release_id` matches the requested id here (QA-37):
+            # this fixture stands in for a release image that genuinely
+            # *is* the one requested, so it must not read as `wrong_image`
+            # — these tests are about QA-40's runner-injection and QA-41's
+            # verify-then-promote race, not the image-identity check.
+            payload = json.dumps(
+                {"release_id": reported, "image_release_id": reported, "overall": overall}
+            )
             return subprocess.CompletedProcess(
                 list(args), 0 if overall == "healthy" else 1, payload + "\n", ""
             )
@@ -115,14 +123,6 @@ def no_real_docker(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-40: `_do_rollback` and `restart` call `status.probe_release` without passing "
-        "`run_compose_fn`, so the compose runner a test injects on `cli.finops` is never "
-        "used and the real `docker` binary is invoked instead."
-    ),
-)
 @pytest.mark.parametrize("command", [["rollback"], ["restart"]])
 def test_rollback_and_restart_use_the_injected_compose_runner(
     two_healthy_releases, no_real_docker, monkeypatch, command: list[str]
@@ -166,13 +166,6 @@ def test_rollback_and_restart_use_the_injected_compose_runner(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-40: same root cause — with the probe unpatchable, a target reporting "
-        "`overall: unhealthy` is indistinguishable from `docker` being absent."
-    ),
-)
 def test_rollback_refuses_an_unhealthy_target_because_it_is_unhealthy(
     two_healthy_releases, no_real_docker, monkeypatch
 ) -> None:
@@ -201,14 +194,6 @@ def test_rollback_refuses_an_unhealthy_target_because_it_is_unhealthy(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-41: `_do_rollback` resolves the target in one session, probes it, then calls "
-        "`release_ops.rollback()` which resolves the target *again* in a second session — "
-        "and reports the first one as rolled back regardless of what the second promoted."
-    ),
-)
 def test_rollback_promotes_the_same_release_it_verified(two_healthy_releases, monkeypatch) -> None:
     """`_do_rollback` is verify-then-act across two transactions:
 
@@ -274,15 +259,6 @@ def test_rollback_promotes_the_same_release_it_verified(two_healthy_releases, mo
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-42: a `pending` row left by an interrupted deploy makes `get_previous` return "
-        "the tracked `previous` release, so `finops rollback` skips past the release that "
-        "is actually current — and only `start_deploy` ever reaps `pending` rows, never "
-        "the rollback path."
-    ),
-)
 def test_rollback_after_an_interrupted_deploy_does_not_skip_the_current_release(
     two_healthy_releases, monkeypatch
 ) -> None:
@@ -343,14 +319,6 @@ def test_rollback_after_an_interrupted_deploy_does_not_skip_the_current_release(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-42: an exception the deploy path does not catch (PermissionError from the "
-        "docker socket, UnicodeDecodeError from a non-UTF-8 byte on the release image's "
-        "stdout) aborts `finops deploy` with a traceback and leaves the release `pending`."
-    ),
-)
 def test_deploy_leaves_no_release_pending_when_the_health_probe_raises(
     two_healthy_releases, monkeypatch
 ) -> None:

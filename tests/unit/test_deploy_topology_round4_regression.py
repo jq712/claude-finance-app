@@ -100,14 +100,6 @@ def _run_wrapper_with_backup_key(tmp_path: Path, key_bytes: bytes) -> subprocess
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-34: a credential containing a NUL byte is silently truncated by `$(cat ...)` "
-        "and exported as a different, shorter value with exit 0 — the exact corruption "
-        "class the round-2 carriage-return check was added to prevent."
-    ),
-)
 def test_wrapper_rejects_a_credential_containing_a_null_byte(tmp_path: Path) -> None:
     r"""`value=$(cat "$file")` drops NUL bytes outright (POSIX command
     substitution has no way to carry one), so `b"good\x00key"` on disk
@@ -132,14 +124,6 @@ def test_wrapper_rejects_a_credential_containing_a_null_byte(tmp_path: Path) -> 
     assert "null byte" in result.stderr.lower() or "nul" in result.stderr.lower()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-35: a credential with leading/trailing whitespace is exported verbatim. "
-        "Whitespace-*only* is rejected; one stray space on the end of an otherwise "
-        "valid key is not, and corrupts the value exactly as a trailing \\r does."
-    ),
-)
 @pytest.mark.parametrize(
     "raw",
     [b"goodkey ", b"goodkey\t", b" goodkey"],
@@ -310,6 +294,7 @@ def test_migrate_service_holds_only_the_migrator_dsn() -> None:
 _UNHEALTHY_PAYLOAD = json.dumps(
     {
         "release_id": "abc1234",
+        "image_release_id": "abc1234",
         "app_version": "0.1.0",
         "database": {"status": "healthy"},
         "migrations": {"status": "drift", "applied": "aaa", "head": "bbb"},
@@ -328,14 +313,6 @@ def _runner_returning(stdout: str):  # noqa: ANN202
     return fake_runner
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-36: `_parse_selfcheck_stdout` takes the LAST line carrying both sentinel "
-        "keys, so a later lookalike object overrides the real selfcheck payload and an "
-        "unhealthy release is promoted as healthy."
-    ),
-)
 @pytest.mark.parametrize(
     "stdout",
     [
@@ -375,19 +352,14 @@ def test_probe_release_does_not_let_a_later_lookalike_override_the_real_payload(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-36: two candidate payloads that disagree are resolved silently by position "
-        "rather than reported as the ambiguity they are."
-    ),
-)
 def test_probe_release_fails_closed_when_two_candidate_payloads_disagree() -> None:
     """Same root cause, stated as the invariant that matters: if the stream
     contains more than one thing claiming to be the selfcheck payload and
     they do not agree, the deploy gate has no basis for picking one and
     must fail closed."""
-    healthy = json.dumps({"release_id": "abc1234", "overall": "healthy"})
+    healthy = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
+    )
     both_orders = [f"{healthy}\n{_UNHEALTHY_PAYLOAD}\n", f"{_UNHEALTHY_PAYLOAD}\n{healthy}\n"]
     verdicts = {
         probe_release(release_id="abc1234", run_compose_fn=_runner_returning(s))["status"]
@@ -427,14 +399,6 @@ def test_probe_release_never_reports_healthy_from_a_failed_compose_run() -> None
     assert probe_release(release_id="abc1234", run_compose_fn=failing)["status"] != "healthy"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-37: `wrong_image` is a tautology as deployed — the release_id the container "
-        "reports is read from the RELEASE_ID env var probe_release itself injects, so it "
-        "can never disagree with the requested one."
-    ),
-)
 def test_wrong_image_detection_is_not_a_tautology() -> None:
     """`probe_release`'s docstring claims `wrong_image` catches "the image
     that actually ran reports a `release_id` other than the one requested
@@ -481,15 +445,6 @@ def test_wrong_image_detection_is_not_a_tautology() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-38: run_compose converts only CalledProcessError/TimeoutExpired/"
-        "FileNotFoundError into ComposeError. PermissionError and the UnicodeDecodeError "
-        "a non-UTF-8 byte on stdout produces escape every `except ComposeError` in the "
-        "deploy path."
-    ),
-)
 @pytest.mark.parametrize(
     "raised",
     [
@@ -670,14 +625,6 @@ def test_restore_verify_cleans_its_staging_directory_on_sigterm(tmp_path: Path) 
             proc.wait(timeout=30)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-39: `trap cleanup EXIT INT TERM` runs cleanup and then *returns* — the script "
-        "keeps running after SIGTERM, having already destroyed its own scratch container "
-        "and password file."
-    ),
-)
 def test_restore_verify_stops_working_after_sigterm(tmp_path: Path) -> None:
     """`systemctl stop finance-restore-drill` (or `TimeoutStartSec=900`
     expiring) sends `SIGTERM`. The handler is `trap cleanup EXIT INT TERM`,

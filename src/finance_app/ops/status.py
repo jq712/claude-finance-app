@@ -284,21 +284,37 @@ def _application_liveness() -> str:
 
 
 def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
-    """The last line of `finance selfcheck --json`'s stdout that looks
-    like its actual payload — a JSON object carrying both `release_id`
-    and `overall` — or `None` if there isn't one.
+    """The line of `finance selfcheck --json`'s stdout that is its actual
+    payload — a JSON object carrying both `release_id` and `overall` — or
+    `None` if there isn't one.
 
-    Scans from the end and keeps going past any line that doesn't fit,
+    Scans the whole stream and keeps going past any line that doesn't fit,
     rather than stopping at the first one: `docker compose run` can
     interleave startup chatter (pull progress, container-creation
-    notices) *after* the command's own output on some Compose versions,
-    and nothing rules out an unrelated JSON object (a structured log line,
-    once `configure_logging` is ever wired to stdout) elsewhere in the
+    notices) around the command's own output on some Compose versions,
+    and nothing rules out an unrelated JSON object (a structured log line
+    — `configure_logging` installs a JSON `StreamHandler` on stdout, and
+    the `app` service runs with `LOG_FORMAT: json`, so the release image's
+    own log stream already shares this file descriptor) elsewhere in the
     stream. Requiring both sentinel keys, rather than accepting the first
     parseable dict, keeps such a line from being misread as the selfcheck
     payload and reported as `wrong_image` or `unreachable` for a release
-    that is actually fine."""
-    for line in reversed(stdout.splitlines()):
+    that is actually fine.
+
+    QA-36: every string on this stream is attacker-influenceable per
+    CLAUDE.md (Plaid merchant text, model responses, `ops.errors.message`
+    could all end up quoted into a log line), so when more than one
+    candidate line matches the sentinel shape, there is no positional rule
+    ("last one wins") that can be trusted to pick the real payload over a
+    lookalike. If every candidate is identical, there is no real
+    ambiguity (Compose or the image printed the same line twice) and it is
+    returned as-is. Otherwise this fails closed: a deterministic gate must
+    not resolve "which of these is the real payload" by position, so
+    `overall` is forced to a value `probe_release` never treats as
+    healthy, and every disagreeing candidate is preserved in `detail` for
+    the operator instead of silently discarded."""
+    candidates: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -307,8 +323,18 @@ def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
         except ValueError:
             continue
         if isinstance(payload, dict) and "release_id" in payload and "overall" in payload:
-            return payload
-    return None
+            candidates.append(payload)
+    if not candidates:
+        return None
+    first = candidates[0]
+    if all(candidate == first for candidate in candidates[1:]):
+        return first
+    return {
+        "release_id": first.get("release_id"),
+        "image_release_id": first.get("image_release_id"),
+        "overall": "ambiguous",
+        "ambiguous_candidates": candidates,
+    }
 
 
 def probe_release(
@@ -352,7 +378,7 @@ def probe_release(
         payload = _parse_selfcheck_stdout(exc.stdout)
         if payload is None:
             return {"status": "unreachable", "reported_release_id": None, "detail": str(exc)}
-        reported = payload.get("release_id")
+        reported = payload.get("image_release_id")
         status_value = "wrong_image" if reported != release_id else "unhealthy"
         return {"status": status_value, "reported_release_id": reported, "detail": payload}
 
@@ -363,7 +389,12 @@ def probe_release(
             "reported_release_id": None,
             "detail": "selfcheck produced no parseable JSON output",
         }
-    reported = payload.get("release_id")
+    # QA-37: compared against `image_release_id` — the build-time identity
+    # baked into the image (Dockerfile `ARG RELEASE_ID`) — never against
+    # `release_id`, which is only the `RELEASE_ID` environment variable
+    # this very call set a few lines up; comparing that against itself can
+    # never disagree, so it could never actually detect a wrong image.
+    reported = payload.get("image_release_id")
     if reported != release_id:
         return {"status": "wrong_image", "reported_release_id": reported, "detail": payload}
     if payload.get("overall") != "healthy":

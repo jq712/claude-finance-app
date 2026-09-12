@@ -74,7 +74,7 @@ def test_rollback_promotes_previous_and_marks_current_rolled_back(db_session: Se
     release_ops.mark_healthy(db_session, second)
     db_session.flush()
 
-    promoted = release_ops.rollback(db_session)
+    promoted = release_ops.rollback(db_session, release_id=first.release_id)
     db_session.flush()
 
     assert promoted.release_id == "1" * 40
@@ -105,13 +105,28 @@ def test_third_consecutive_healthy_deploy_demotes_oldest_to_plain_history(
     assert first.status == "history"
 
 
-def test_rollback_with_no_previous_release_raises(db_session: Session) -> None:
+def test_get_previous_is_none_after_a_single_deploy(db_session: Session) -> None:
+    """The invariant `_do_rollback` (`cli.finops`) relies on to raise
+    `NoPreviousReleaseError` before ever calling `rollback` (QA-41 moved
+    that check to the caller, which resolves and health-verifies the
+    target once rather than having `rollback` re-derive it) — a single
+    deploy has nothing to fall back to."""
     only = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
     release_ops.mark_healthy(db_session, only)
     db_session.flush()
 
+    assert release_ops.get_previous(db_session) is None
+
+
+def test_rollback_raises_when_the_target_release_id_is_not_tracked(db_session: Session) -> None:
+    """`rollback` no longer resolves its own target (QA-41) — it promotes
+    exactly the `release_id` it's given, which by construction is always
+    one `_do_rollback` already found via `get_previous`. This is the
+    defensive backstop for that contract being violated (a bug, or a
+    release row deleted between resolution and promotion — rows here are
+    never deleted in practice)."""
     with pytest.raises(release_ops.NoPreviousReleaseError):
-        release_ops.rollback(db_session)
+        release_ops.rollback(db_session, release_id="9" * 40)
 
 
 def test_deploy_auto_rollback_then_recovery_still_tracks_last_known_good(

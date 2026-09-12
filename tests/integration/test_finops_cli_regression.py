@@ -35,7 +35,10 @@ def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
     exercise a deploy whose *release* is fine and are free to focus on
     whatever else they're actually testing."""
     if "selfcheck" in args:
-        payload = json.dumps({"release_id": (env or {}).get("RELEASE_ID"), "overall": "healthy"})
+        reported = (env or {}).get("RELEASE_ID")
+        payload = json.dumps(
+            {"release_id": reported, "image_release_id": reported, "overall": "healthy"}
+        )
         return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
     return subprocess.CompletedProcess(list(args), 0, "", "")
 

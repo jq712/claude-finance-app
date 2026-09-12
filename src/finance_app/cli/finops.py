@@ -199,7 +199,9 @@ def restart(
     if release is None:
         console.print("[red]restart failed:[/red] no release is currently recorded")
         raise typer.Exit(1)
-    result = status.probe_release(release_id=release["release_id"], compose_file=compose_file)
+    result = status.probe_release(
+        release_id=release["release_id"], compose_file=compose_file, run_compose_fn=run_compose
+    )
     if result["status"] != "healthy":
         console.print(f"[red]restart failed:[/red] {result}")
         raise typer.Exit(1)
@@ -260,12 +262,36 @@ def deploy(
         raise typer.Exit(1) from exc
 
     with observer_session_scope() as obs_session:
-        health = status.deploy_health_check(
-            obs_session,
-            release_id=release_id,
-            compose_file=compose_file,
-            run_compose_fn=run_compose,
-        )
+        try:
+            health = status.deploy_health_check(
+                obs_session,
+                release_id=release_id,
+                compose_file=compose_file,
+                run_compose_fn=run_compose,
+            )
+        except Exception as exc:  # noqa: BLE001 - QA-42: `run_compose`/`probe_release`
+            # already turn every subprocess failure they anticipate into
+            # `ComposeError` (QA-38), which `deploy_health_check` handles
+            # internally — this is the backstop for anything that still
+            # escapes (e.g. a caller-supplied `run_compose_fn` that raises
+            # directly). Without it, the release stays `pending` forever:
+            # neither `mark_healthy` nor `mark_failed` below ever runs, so
+            # the deploy either succeeded or it didn't gets no answer, and
+            # the operator gets a raw traceback from the one command that
+            # is supposed to be the narrow, auditable production
+            # interface. Treated exactly like an unhealthy release — the
+            # release must end up `failed`, and auto-rollback must still
+            # get a chance to run.
+            health = {
+                "overall": "unhealthy",
+                "database": "unknown",
+                "migrations": "unknown",
+                "application": {
+                    "status": "error",
+                    "reported_release_id": None,
+                    "detail": f"health check raised {exc!r}",
+                },
+            }
 
     with session_scope() as session:
         release = session.get(Release, release_row_id)
@@ -295,6 +321,15 @@ def deploy(
         console.print(
             f"[red]automatic rollback target is also unhealthy ({exc}) — manual "
             "intervention required.[/red]"
+        )
+        raise typer.Exit(1) from None
+    except Exception as exc:  # noqa: BLE001 - the failed release is already recorded
+        # `failed` above regardless of what happens here; this only keeps
+        # the auto-rollback *attempt* itself from crashing out with a raw
+        # traceback (QA-42) if whatever broke the health check (e.g. a
+        # Docker-socket permission issue) also breaks the rollback probe.
+        console.print(
+            f"[red]automatic rollback itself failed ({exc!r}) — manual intervention required.[/red]"
         )
         raise typer.Exit(1) from None
     raise typer.Exit(1)
@@ -336,12 +371,18 @@ def _do_rollback(compose_file: str) -> str:
             raise release_ops.NoPreviousReleaseError("No previous known-good release is tracked.")
         target_release_id = previous.release_id
 
-    health = status.probe_release(release_id=target_release_id, compose_file=compose_file)
+    health = status.probe_release(
+        release_id=target_release_id, compose_file=compose_file, run_compose_fn=run_compose
+    )
     if health["status"] != "healthy":
         raise RollbackTargetUnhealthyError(f"{target_release_id}: {health}")
 
+    # QA-41: promotes exactly the release id that was just probed, never
+    # re-derived — see `release_ops.rollback`'s docstring for why a second
+    # `get_previous` resolution here could silently disagree with the
+    # first one.
     with session_scope() as session:
-        release_ops.rollback(session)
+        release_ops.rollback(session, release_id=target_release_id)
     return target_release_id
 
 

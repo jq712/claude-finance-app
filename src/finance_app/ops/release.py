@@ -95,28 +95,36 @@ def _tracked_previous(session: Session) -> Release | None:
 def get_previous(session: Session) -> Release | None:
     """The release a rollback right now should target (ADR-008).
 
-    Two cases collapse into this one function:
+    Three cases collapse into this one function:
 
     - The most recent deploy attempt is healthy/`current`: the rollback
       target is the tracked `previous` release — plain bookkeeping,
       populated by `mark_healthy`.
-    - The most recent deploy attempt `failed`: `mark_failed` never
-      touches current/previous (see its docstring), so whatever is
-      tracked as `current` right now is still the release that is
-      actually running, whether or not the failed attempt's own
-      container ever started — an operator or the deploy auto-rollback
-      needs to redeploy *that* image, not skip past it to something
-      older (QA-2). If that `current` release has no deploy history of
-      its own (`replaces_release_id is None` — it was the very first
-      release ever deployed), there genuinely is nothing to fall back
-      to, and this returns `None`.
+    - The most recent deploy attempt `failed`, or is still `pending`
+      (QA-42 — a deploy killed between `start_deploy` and
+      `mark_healthy`/`mark_failed`, e.g. SIGKILL, VPS reboot, OOM, or any
+      exception the deploy path doesn't catch, before its row ever
+      resolves): `mark_failed` never touches current/previous (see its
+      docstring) and a `pending` attempt hasn't touched them either, so
+      whatever is tracked as `current` right now is still the release
+      that is actually running, whether or not the unresolved attempt's
+      own container ever started — an operator or the deploy
+      auto-rollback needs to redeploy *that* image, not skip past it to
+      something older (QA-2, reached a second way by QA-42). If that
+      `current` release has no deploy history of its own
+      (`replaces_release_id is None` — it was the very first release ever
+      deployed), there genuinely is nothing to fall back to, and this
+      returns `None`. `_reap_stale_pending_deploys` (in `start_deploy`)
+      eventually turns a `pending` row into `failed`, but only on the
+      *next* deploy — this covers the rollback path in the meantime,
+      which never calls it.
     """
     latest = (
         session.execute(select(Release).order_by(Release.deployed_at.desc(), Release.id.desc()))
         .scalars()
         .first()
     )
-    if latest is not None and latest.status == "failed":
+    if latest is not None and latest.status in ("failed", "pending"):
         current = get_current(session)
         if current is not None and current.replaces_release_id is not None:
             return current
@@ -229,24 +237,43 @@ def mark_failed(session: Session, release: Release, *, reason: str) -> None:
     release.notes = reason[:2000]
 
 
-def rollback(session: Session) -> Release:
-    """Promote the release `get_previous` resolves as the rollback target
-    back to `current`.
+def rollback(session: Session, *, release_id: str) -> Release:
+    """Promote `release_id` to `current`.
 
-    If that target is already `current` (QA-2's failed-deploy case —
-    `mark_failed` never demoted it in the first place), this is a no-op
-    at the bookkeeping level: nothing to promote or demote, it's already
-    the right release. The caller (`_do_rollback` in `cli.finops`) still
-    needs to redeploy its image via `docker compose up`, since the failed
-    attempt's container may already be running. Otherwise (a plain
-    healthy-to-healthy rollback), the current release is demoted and
-    marked `rolled_back` and the target is promoted, as before.
+    QA-41: takes the target release id directly rather than re-deriving it
+    via `get_previous` — the caller (`_do_rollback` in `cli.finops`)
+    already resolved and health-verified one specific release via
+    `probe_release` before calling this, in a separate DB session. Calling
+    `get_previous` again here re-runs that same, state-dependent
+    resolution a second time; if `ops.releases` changed during the probe
+    window (an image pull and container start: seconds to minutes — e.g.
+    a concurrent deploy landed and failed), the second resolution can
+    silently disagree with the first, promoting a release that was never
+    actually probed while the CLI still reports the one that was.
+    Resolve once, probe that, promote exactly that — never re-derive.
 
-    Raises `NoPreviousReleaseError` if there is nothing to roll back to.
+    If `release_id` is already `current` (QA-2's failed-deploy/QA-42's
+    pending-deploy case — neither `mark_failed` nor an unresolved
+    `pending` row ever demoted it), this is a no-op at the bookkeeping
+    level: nothing to promote or demote, it's already the right release.
+    The caller still needs to redeploy its image via `docker compose up`,
+    since the failed/interrupted attempt's container may already be
+    running. Otherwise (a plain healthy-to-healthy rollback), the current
+    release is demoted and marked `rolled_back` and the target is
+    promoted, as before.
+
+    Raises `NoPreviousReleaseError` if `release_id` no longer identifies
+    any tracked release (it was resolved by the caller but has since been
+    removed — not expected in practice, since rows here are never
+    deleted, but this must not silently promote nothing).
     """
-    target = get_previous(session)
+    target = (
+        session.execute(select(Release).where(Release.release_id == release_id)).scalars().first()
+    )
     if target is None:
-        raise NoPreviousReleaseError("No previous known-good release is tracked.")
+        raise NoPreviousReleaseError(
+            f"release {release_id!r} is no longer tracked in ops.releases."
+        )
     current = get_current(session)
     if current is not None and current.id == target.id:
         return target

@@ -524,7 +524,9 @@ def test_restore_verify_removes_the_scratch_password_only_after_readiness() -> N
 
 
 def test_probe_release_reports_healthy_when_the_right_release_selfchecks_clean() -> None:
-    payload = json.dumps({"release_id": "abc1234", "overall": "healthy"})
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
+    )
 
     def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
         return subprocess.CompletedProcess([], 0, payload + "\n", "")
@@ -534,15 +536,18 @@ def test_probe_release_reports_healthy_when_the_right_release_selfchecks_clean()
     assert result["reported_release_id"] == "abc1234"
 
 
+_HEALTHY_ABC1234 = json.dumps(
+    {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
+)
+
+
 @pytest.mark.parametrize(
     "stdout",
     [
-        json.dumps({"release_id": "abc1234", "overall": "healthy"}) + "\n",
-        "Creating network...\n" + json.dumps({"release_id": "abc1234", "overall": "healthy"}),
-        json.dumps({"release_id": "abc1234", "overall": "healthy"})
-        + "\nContainer app-run-1  Removed\n",
-        json.dumps({"release_id": "abc1234", "overall": "healthy"})
-        + '\n{"level": "info", "msg": "done"}\n',
+        _HEALTHY_ABC1234 + "\n",
+        "Creating network...\n" + _HEALTHY_ABC1234,
+        _HEALTHY_ABC1234 + "\nContainer app-run-1  Removed\n",
+        _HEALTHY_ABC1234 + '\n{"level": "info", "msg": "done"}\n',
     ],
     ids=["clean", "leading-chatter", "trailing-chatter", "trailing-unrelated-json"],
 )
@@ -568,7 +573,13 @@ def test_probe_release_detects_a_wrong_image() -> None:
     the wrong release — is structurally eliminated by D3: `probe_release`
     runs the exact image under deployment and checks what it reports about
     itself, so a stale/wrong image is caught by content, not by luck."""
-    payload = json.dumps({"release_id": "stale999", "overall": "healthy"})
+    # `release_id` (the RELEASE_ID env var probe_release injected) reads
+    # back as the requested id, same as ever — it's `image_release_id`
+    # (the build-time identity baked into the image actually running,
+    # QA-37) that disagrees, which is what `wrong_image` must catch.
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "stale999", "overall": "healthy"}
+    )
 
     def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
         return subprocess.CompletedProcess([], 0, payload + "\n", "")
@@ -579,7 +590,9 @@ def test_probe_release_detects_a_wrong_image() -> None:
 
 
 def test_probe_release_reports_unhealthy_on_a_nonzero_selfcheck_exit() -> None:
-    payload = json.dumps({"release_id": "abc1234", "overall": "unhealthy"})
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "unhealthy"}
+    )
 
     def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise ComposeError("docker compose run ... failed (exit 1): ...", stdout=payload + "\n")

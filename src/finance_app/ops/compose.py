@@ -86,3 +86,16 @@ def run_compose(
             "docker CLI not found — finops deploy/rollback/restart must run on a host "
             "with Docker installed (the VPS), not inside the engineering environment."
         ) from exc
+    except OSError as exc:
+        # QA-38: a `PermissionError` (docker socket not accessible), a
+        # `UnicodeDecodeError` (`text=True` decodes strictly, so one
+        # non-UTF-8 byte anywhere on the release image's stdout raises
+        # instead of returning), or a bare `OSError` from fork/posix_spawn
+        # would otherwise escape past every `except ComposeError` in the
+        # deploy path (`cli/finops.py`'s `deploy`, `ops/status.py`'s
+        # `probe_release`) as a raw traceback, leaving the release
+        # `pending` with no auto-rollback attempted. `UnicodeDecodeError`
+        # is a `ValueError`, not an `OSError`, so it needs its own clause.
+        raise ComposeError(f"{' '.join(command)} failed: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ComposeError(f"{' '.join(command)} produced undecodable output: {exc}") from exc

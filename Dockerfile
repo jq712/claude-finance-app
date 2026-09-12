@@ -55,6 +55,21 @@ RUN uv sync --locked --no-dev
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
+# QA-37: baked at build time from CI's own Git SHA (`docker/build-push-
+# action@v6`'s `build-args: RELEASE_ID=${{ github.sha }}` in
+# publish-image, .github/workflows/ci.yml) — never overridden by
+# `deploy/compose.yaml`'s `RELEASE_ID: ${RELEASE_ID:-}`, which is a
+# *different*, runtime-only environment variable `probe_release` injects
+# into the container it starts. `Settings.image_release_id` reads this
+# one; `finance selfcheck` reports both, and `probe_release`'s
+# `wrong_image` check compares this one against the release id it
+# requested — the value the *image itself* carries, not an echo of
+# whatever `probe_release` happened to inject, which is what made that
+# check a tautology before this existed.
+ARG RELEASE_ID=unknown
+LABEL org.opencontainers.image.revision=$RELEASE_ID
+ENV IMAGE_RELEASE_ID=$RELEASE_ID
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \

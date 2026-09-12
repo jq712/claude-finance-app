@@ -27,11 +27,17 @@ from finance_app.ops.status import db_status, migration_status
 
 
 def selfcheck() -> dict[str, Any]:
-    """{"release_id", "app_version", "database": {...}, "migrations": {...},
-    "overall": "healthy"|"unhealthy"}. `overall` is healthy only when the
-    database is reachable *and* this image's migration head matches what's
-    applied — the same bar `deploy_health_check` used to hold the deploy
-    container to, now answered by the party that actually knows it."""
+    """{"release_id", "image_release_id", "app_version", "database": {...},
+    "migrations": {...}, "overall": "healthy"|"unhealthy"}. `overall` is
+    healthy only when the database is reachable *and* this image's
+    migration head matches what's applied — the same bar
+    `deploy_health_check` used to hold the deploy container to, now
+    answered by the party that actually knows it. `image_release_id`
+    (QA-37) is the build-time identity baked into the image itself,
+    distinct from `release_id` (the `RELEASE_ID` environment variable this
+    process happened to be started with) — `probe_release`'s `wrong_image`
+    check needs the former; the latter can never disagree with what
+    `probe_release` itself just injected."""
     settings = get_settings()
     with session_scope() as session:
         database = db_status(session)
@@ -48,6 +54,7 @@ def selfcheck() -> dict[str, Any]:
     )
     return {
         "release_id": settings.release_id or None,
+        "image_release_id": settings.image_release_id or None,
         "app_version": __version__,
         "database": database,
         "migrations": migrations,

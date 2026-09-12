@@ -44,7 +44,10 @@ def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
     reports the pinned `RELEASE_ID` as healthy — see the identical helper
     in tests/integration/test_finops_cli_regression.py."""
     if "selfcheck" in args:
-        payload = json.dumps({"release_id": (env or {}).get("RELEASE_ID"), "overall": "healthy"})
+        reported = (env or {}).get("RELEASE_ID")
+        payload = json.dumps(
+            {"release_id": reported, "image_release_id": reported, "overall": "healthy"}
+        )
         return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
     return subprocess.CompletedProcess(list(args), 0, "", "")
 
@@ -172,7 +175,9 @@ def test_deploy_health_check_does_not_depend_on_the_process_working_directory(
     monkeypatch.chdir(tmp_path)
     assert not (tmp_path / "alembic.ini").exists()
 
-    payload = json.dumps({"release_id": "abc1234", "overall": "healthy"})
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
+    )
 
     def fake_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
         compose_file, *args, env=None, **kwargs
@@ -206,8 +211,9 @@ def test_rollback_refuses_to_promote_a_target_that_fails_its_own_selfcheck(
 
     def unhealthy_run_compose(compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
         if "selfcheck" in args:
+            reported = (env or {}).get("RELEASE_ID")
             payload = json.dumps(
-                {"release_id": (env or {}).get("RELEASE_ID"), "overall": "unhealthy"}
+                {"release_id": reported, "image_release_id": reported, "overall": "unhealthy"}
             )
             return subprocess.CompletedProcess(list(args), 1, payload + "\n", "")
         return subprocess.CompletedProcess(list(args), 0, "", "")

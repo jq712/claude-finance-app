@@ -203,6 +203,18 @@ for pair in $(_credential_names); do
     esac
     file="${CREDENTIALS_DIRECTORY}/$name"
     [ -f "$file" ] || continue
+    # A NUL byte anywhere in the file truncates `$(cat "$file")` outright —
+    # POSIX command substitution has no way to carry one — so the value
+    # this script would export is silently *shorter* than what's on disk,
+    # with no error and exit 0. Detected directly against the file, via a
+    # tool (`od`) that never round-trips the content through a NUL-
+    # truncating command substitution itself: its own stdout is plain hex
+    # text, safe to capture normally. Must run before `value=$(cat ...)`
+    # below, which is exactly the corrupting step this guards.
+    if od -An -tx1 "$file" | tr -s ' \n' ' ' | grep -q ' 00 '; then
+        echo "with-production-env.sh: credential '$name' (job '$JOB') contains a NUL byte — refusing to export it" >&2
+        exit 1
+    fi
     value=$(cat "$file")
     # A credential containing a newline must never be exported partially
     # or re-interpreted — reject it outright rather than silently
@@ -222,6 +234,19 @@ for pair in $(_credential_names); do
     case "$value" in
         *"$(printf '\r')"*)
             echo "with-production-env.sh: credential '$name' (job '$JOB') contains a carriage return — refusing to export it" >&2
+            exit 1
+            ;;
+    esac
+    # Leading/trailing whitespace (a stray keystroke while minting or
+    # pasting a credential) is the same silent-corruption class as the CR
+    # case above and just as invisible in a terminal — reject it rather
+    # than exporting a value that differs from what the operator recorded
+    # out-of-band. Internal whitespace is left alone: nothing here
+    # requires a credential to be a single "word".
+    tab="$(printf '\t')"
+    case "$value" in
+        " "* | "$tab"* | *" " | *"$tab")
+            echo "with-production-env.sh: credential '$name' (job '$JOB', $env_var) has leading or trailing whitespace — refusing to export it" >&2
             exit 1
             ;;
     esac

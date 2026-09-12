@@ -269,6 +269,14 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}:latest
+          # QA-37: bakes the image's build-time identity (Dockerfile `ARG
+          # RELEASE_ID` -> `ENV IMAGE_RELEASE_ID`) to the same Git SHA it's
+          # tagged with, so `ops.status.probe_release`'s `wrong_image`
+          # check has a value to compare that the running container itself
+          # carries, not one echoed back from the environment the check
+          # injected.
+          build-args: |
+            RELEASE_ID=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
