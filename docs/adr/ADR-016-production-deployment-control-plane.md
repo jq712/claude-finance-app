@@ -2,6 +2,21 @@
 
 **Status:** Accepted
 
+## Implementation status
+
+The decision below (D1–D8) was accepted in full; what has actually shipped is narrower. A commit message and this branch's PR title both asserted D8 was done when it wasn't — trust this table over either, and update it in the same PR as whatever changes the underlying status (verified 2026-09-12, round-3 security/QA review):
+
+| Decision | Status |
+|---|---|
+| D1 — Compose stops enforcing credential requirements; the job wrapper does | Shipped |
+| D2 — no long-running `app` service | Shipped |
+| D3 — post-deploy probe runs the image being deployed | Shipped, with open follow-up defects: `probe_release`'s `wrong_image` check is currently a tautology (compares the `RELEASE_ID` it injects against the same var echoed back), and `_do_rollback`/`restart`'s use of the probe is untested (the injectable compose runner isn't threaded through, so the existing test silently shells out to real `docker`) |
+| D4 — migration head is a property of the installed package, not the CWD | **Not shipped.** `finance_app.db.migrate` and the `migrations/` → `src/finance_app/migrations/` move do not exist; `deploy/compose.yaml`'s `migrate` service deliberately still runs `alembic upgrade head` against the repo-root `alembic.ini` — see that service's own comment, and do not point it at `finance_app.db.migrate` until this ships |
+| D5 — one lock for the whole deploy | **Not shipped** (`tests/integration/test_deploy_gate_regression.py`, `xfail(strict=True)`, QA-21) |
+| D6 — migration 0005 deduplicates before it constrains | **Not shipped** (same file, QA-23) |
+| D7 — throwaway secrets for host-launched containers live in `RuntimeDirectory` | Shipped |
+| D8 — the recorded release is persisted where the timers read it | **Not shipped.** No `finops current-release` command, nothing writes `/etc/finance-app/env`, no `ReadWritePaths=/etc/finance-app` on any unit — see `docs/deployment.md`'s "Deliberately deferred" section |
+
 Refines ADR-007, ADR-008, ADR-011 and ADR-015. Supersedes none of them: every invariant those ADRs assert still holds, and two of them (ADR-008's "rollback is one step", ADR-011's "no in-application scheduler") are strengthened here. This ADR resolves a set of Milestone 7 defects that two independent review rounds (security-reviewer, qa-adversarial) each traced to one structural collision rather than to individual bugs.
 
 ## Context

@@ -70,7 +70,7 @@ diagnostic/deployment surface handoff §10 requires so autonomous engineering ag
 | `finops migration-status [--json]` | Applied Alembic revision vs. repo head | `finance_observer` |
 | `finops backup-status [--json]` | Most recent backup and whether it's restore-verified | `finance_observer` |
 | `finops recent-errors [--limit N] [--json]` | Recent sanitized `ops.errors` rows | `finance_observer` |
-| `finops restart` | `docker compose restart app` only | none (shells to `docker compose`) |
+| `finops restart` | Re-runs `finance selfcheck` against the currently-recorded release and reports whether it's still healthy (ADR-016 D2 — `app` is one-shot, not a long-running process to restart). Never writes to `ops.releases`. | `finance_observer` (read current release) + `docker compose` |
 | `finops deploy <sha>` | Pull, deploy, health-check, promote-or-auto-rollback (ADR-008) | `finance_app` (write) + `docker compose` |
 | `finops rollback` | Promote the tracked previous release back to current | `finance_app` (write) + `docker compose` |
 

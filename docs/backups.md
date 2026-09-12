@@ -13,7 +13,7 @@ pg_dump (as finance_backup — read-only everywhere, migrations/versions/0002)
     -> ops.backup_runs row recorded (as finance_app; finance_backup cannot write)
 ```
 
-All of this is `src/finance_app/ops/backup.py::create_backup()` — not shell one-liners — so it's unit-testable and there is exactly one place this logic lives. `deploy/scripts/backup.sh` is a two-line wrapper that runs it inside the already-built `app` image via `docker compose run --rm app python -m finance_app.ops.backup backup`, so a backup always uses the exact code of the currently-deployed release.
+All of this is `src/finance_app/ops/backup.py::create_backup()` — not shell one-liners — so it's unit-testable and there is exactly one place this logic lives. `deploy/scripts/backup.sh` is a two-line wrapper that runs it inside the already-built image's dedicated one-shot `backup` Compose service via `docker compose --profile backup run --rm -T backup python -m finance_app.ops.backup backup` — never the long-running `app` service, so `finance_backup`/`BACKUP_ENCRYPTION_KEY` stay scoped to that one-shot job (ADR-016 D1) — so a backup always uses the exact code of the currently-deployed release.
 
 ## Schedule and retention
 
@@ -54,7 +54,7 @@ These are deliberately loose relative to a multi-user production system — a si
 
 ## What's encrypted, and when
 
-The plaintext `pg_dump` output exists only briefly, on local disk, inside the `app` container's filesystem (the mounted backup volume), and is unlinked (`Path.unlink`) immediately after GPG encryption succeeds — including in the failure path (`finally: plaintext_path.unlink(missing_ok=True)` in `create_backup`/`restore_backup`). The encrypted `.gpg` archive is the only artifact that persists.
+The plaintext `pg_dump`/`pg_restore` output exists only briefly, on local disk, inside the `backup` container's filesystem (the mounted backup volume), in a private per-run staging directory — removed immediately after GPG encryption succeeds, including in the failure path (`finally: shutil.rmtree(staging_dir, ignore_errors=True)` in `create_backup`/`restore_backup`, QA-10). A leftover staging directory from a process that didn't get to run its own `finally` (SIGKILL, OOM) is swept on the next backup/restore invocation (`_sweep_stale_staging_dirs`). The encrypted `.gpg` archive is the only artifact that persists.
 
 ## Deliberately deferred
 

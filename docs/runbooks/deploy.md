@@ -98,7 +98,7 @@ with an empty or wrong credential set.
    cd /opt/finance-app
    finops_run deploy <sha>
    ```
-   `finops deploy` runs inside the narrowly-scoped `deploy` Compose service (Docker socket mounted — see that service's comment in `compose.yaml` for why it's split from the long-running `app` service). It pulls the image, brings the stack up under that tag, runs the health check, and either promotes the release to `current` or automatically rolls back — see `docs/deployment.md`.
+   `finops deploy` runs inside the narrowly-scoped `deploy` Compose service (Docker socket mounted — see that service's comment in `compose.yaml` for why it's split from `app`, which is itself one-shot and profile-gated, not long-running, until Milestone 8 — ADR-016 D2). It pulls the image, runs the migration preflight, health-checks the release via a one-shot `finance selfcheck` probe against that exact image (no persistent bring-up), and either promotes the release to `current` or automatically rolls back — see `docs/deployment.md`.
 4. Verify:
    ```
    docker compose -f deploy/compose.yaml --profile finops run --rm finops finops health
@@ -115,7 +115,7 @@ cd /opt/finance-app
 finops_run deploy <sha>
 ```
 
-That's the entire procedure — no compose file edits, no manual image pulls, no restart choreography. `finops deploy` handles pull, bring-up, health verification, and (on failure) automatic rollback.
+That's the entire procedure — no compose file edits, no manual image pulls, no restart choreography. `finops deploy` handles the pull, migration preflight, health verification (a one-shot selfcheck probe against the deployed image — nothing is brought up persistently), and, on failure, automatic rollback.
 
 ## 5. Rollback
 
@@ -131,7 +131,7 @@ Rolls back to the tracked previous known-good release — no rebuild, no registr
 finops_run restart
 ```
 
-ADR-016 D2: `app` is a one-shot `docker compose --profile app run --rm` command until Milestone 8's webhook server, not a long-running process — there is nothing to restart in the traditional sense. `finops restart` re-runs `finance selfcheck` against the currently-recorded release and reports whether it's still healthy; it touches neither Postgres nor `ops.releases`. Use it to re-confirm the deployed release is healthy without deploying anything new — once Milestone 8 lands, this regains a real process to restart.
+ADR-016 D2: `app` is a one-shot `docker compose --profile app run --rm` command until Milestone 8's webhook server, not a long-running process — there is nothing to restart in the traditional sense. `finops restart` reads the currently-recorded release id (`finance_observer`, read-only) and re-runs `finance selfcheck` against it, reporting whether it's still healthy; it never writes to `ops.releases`. Use it to re-confirm the deployed release is healthy without deploying anything new — once Milestone 8 lands, this regains a real process to restart.
 
 ## 7. Credential rotation
 
