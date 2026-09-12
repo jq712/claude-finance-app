@@ -261,37 +261,52 @@ def deploy(
         console.print(f"[red]deploy failed to start:[/red] {exc}")
         raise typer.Exit(1) from exc
 
-    with observer_session_scope() as obs_session:
-        try:
+    try:
+        with observer_session_scope() as obs_session:
             health = status.deploy_health_check(
                 obs_session,
                 release_id=release_id,
                 compose_file=compose_file,
                 run_compose_fn=run_compose,
             )
-        except Exception as exc:  # noqa: BLE001 - QA-42: `run_compose`/`probe_release`
-            # already turn every subprocess failure they anticipate into
-            # `ComposeError` (QA-38), which `deploy_health_check` handles
-            # internally — this is the backstop for anything that still
-            # escapes (e.g. a caller-supplied `run_compose_fn` that raises
-            # directly). Without it, the release stays `pending` forever:
-            # neither `mark_healthy` nor `mark_failed` below ever runs, so
-            # the deploy either succeeded or it didn't gets no answer, and
-            # the operator gets a raw traceback from the one command that
-            # is supposed to be the narrow, auditable production
-            # interface. Treated exactly like an unhealthy release — the
-            # release must end up `failed`, and auto-rollback must still
-            # get a chance to run.
-            health = {
-                "overall": "unhealthy",
-                "database": "unknown",
-                "migrations": "unknown",
-                "application": {
-                    "status": "error",
-                    "reported_release_id": None,
-                    "detail": f"health check raised {exc!r}",
-                },
-            }
+    except typer.Exit:
+        # `typer.Exit` is a `click.exceptions.Exit`, itself a
+        # `RuntimeError` subclass — an ordinary `except Exception` below
+        # would catch it too and relabel a deliberate CLI exit as "health
+        # check raised". Nothing in this block raises it today, but the
+        # distinction matters enough (a future refactor could easily
+        # introduce one) to keep explicit rather than rely on that.
+        raise
+    except Exception as exc:  # noqa: BLE001 - QA-42: `run_compose`/`probe_release`
+        # already turn every subprocess failure they anticipate into
+        # `ComposeError` (QA-38), which `deploy_health_check` handles
+        # internally — this is the backstop for anything that still
+        # escapes (e.g. a caller-supplied `run_compose_fn` that raises
+        # directly, or the database going unreachable mid-check — that
+        # exception surfaces from `observer_session_scope`'s own commit
+        # on the way out, which is why this wraps the whole `with`, not
+        # just the `deploy_health_check` call inside it). Without it, the
+        # release stays `pending` forever: neither `mark_healthy` nor
+        # `mark_failed` below ever runs, so the deploy either succeeded or
+        # it didn't gets no answer, and the operator gets a raw traceback
+        # from the one command that is supposed to be the narrow,
+        # auditable production interface. Treated exactly like an
+        # unhealthy release — the release must end up `failed`, and
+        # auto-rollback must still get a chance to run. Only the
+        # exception's *class name* is recorded, never `str(exc)`/`repr(exc)`
+        # (docs/security-model.md invariant 6) — some exception types
+        # (e.g. a SQLAlchemy connection error) embed the DSN, including
+        # its password, directly in their message.
+        health = {
+            "overall": "unhealthy",
+            "database": "unknown",
+            "migrations": "unknown",
+            "application": {
+                "status": "error",
+                "reported_release_id": None,
+                "detail": f"health check raised {type(exc).__name__}",
+            },
+        }
 
     with session_scope() as session:
         release = session.get(Release, release_row_id)
@@ -307,7 +322,17 @@ def deploy(
         console.print(f"[green]deployed {release_id}[/green] ({image_ref})")
         return
 
-    console.print(f"[red]post-deploy health check failed:[/red] {health}")
+    # `health` wrapped in `Text` (never re-parsed as markup, same pattern
+    # as `_emit` above) rather than interpolated into the markup string
+    # directly: it can carry selfcheck/compose output sourced from the
+    # release image's own stdout — attacker-influenceable per CLAUDE.md
+    # (Plaid merchant text, model responses) and, since QA-36, potentially
+    # a list of disagreeing candidate payloads verbatim. Interpolated
+    # unescaped, any `[...]`-shaped substring in it would be parsed as
+    # markup, and an unmatched closing tag raises `MarkupError` here —
+    # after the release is already marked `failed` but before
+    # auto-rollback runs.
+    console.print("[red]post-deploy health check failed:[/red]", Text(str(health)))
     console.print("[yellow]rolling back automatically (ADR-008)...[/yellow]")
     try:
         _do_rollback(compose_file)
@@ -323,13 +348,22 @@ def deploy(
             "intervention required.[/red]"
         )
         raise typer.Exit(1) from None
+    except typer.Exit:
+        # See the matching guard above `deploy_health_check`'s catch-all:
+        # `typer.Exit` is a `RuntimeError` subclass and must not be
+        # relabeled by the blanket handler below.
+        raise
     except Exception as exc:  # noqa: BLE001 - the failed release is already recorded
         # `failed` above regardless of what happens here; this only keeps
         # the auto-rollback *attempt* itself from crashing out with a raw
         # traceback (QA-42) if whatever broke the health check (e.g. a
         # Docker-socket permission issue) also breaks the rollback probe.
+        # Only the exception's class name is recorded — see the matching
+        # comment above `deploy_health_check`'s own catch-all for why
+        # `str`/`repr` of an arbitrary exception is not safe to surface.
         console.print(
-            f"[red]automatic rollback itself failed ({exc!r}) — manual intervention required.[/red]"
+            "[red]automatic rollback itself failed[/red]",
+            f"({type(exc).__name__}) — manual intervention required.",
         )
         raise typer.Exit(1) from None
     raise typer.Exit(1)
@@ -370,6 +404,13 @@ def _do_rollback(compose_file: str) -> str:
         if previous is None:
             raise release_ops.NoPreviousReleaseError("No previous known-good release is tracked.")
         target_release_id = previous.release_id
+        # The row's primary key, not just its `release_id` (Git SHA):
+        # `release_id` is deliberately not unique (a SHA can recur across
+        # a failed attempt and a later successful one — see
+        # `release_ops.rollback`'s docstring), so only the row identity
+        # guarantees the release promoted below is the exact one just
+        # probed, not merely one that happens to share its SHA.
+        target_row_id = previous.id
 
     health = status.probe_release(
         release_id=target_release_id, compose_file=compose_file, run_compose_fn=run_compose
@@ -377,12 +418,12 @@ def _do_rollback(compose_file: str) -> str:
     if health["status"] != "healthy":
         raise RollbackTargetUnhealthyError(f"{target_release_id}: {health}")
 
-    # QA-41: promotes exactly the release id that was just probed, never
+    # QA-41: promotes exactly the row that was just probed, never
     # re-derived — see `release_ops.rollback`'s docstring for why a second
     # `get_previous` resolution here could silently disagree with the
     # first one.
     with session_scope() as session:
-        release_ops.rollback(session, release_id=target_release_id)
+        release_ops.rollback(session, release_row_id=target_row_id)
     return target_release_id
 
 

@@ -211,10 +211,27 @@ for pair in $(_credential_names); do
     # truncating command substitution itself: its own stdout is plain hex
     # text, safe to capture normally. Must run before `value=$(cat ...)`
     # below, which is exactly the corrupting step this guards.
-    if od -An -tx1 "$file" | tr -s ' \n' ' ' | grep -q ' 00 '; then
-        echo "with-production-env.sh: credential '$name' (job '$JOB') contains a NUL byte — refusing to export it" >&2
+    #
+    # `od` is run alone in its own command substitution, not piped
+    # straight into `tr`/`grep`, so its exit status is actually checked:
+    # a pipeline's exit status is only its *last* command's per POSIX (no
+    # `pipefail` in plain `sh`), so `od_out=$(od ... | tr ... | grep -q
+    # ...)` would silently swallow `od` failing (missing binary,
+    # permission error) — `grep -q` would just see empty input, return
+    # false, and this would fall straight through into the very
+    # truncation this guards against. A NUL-detection guard that fails
+    # open on tool failure is not a guard.
+    if ! od_out=$(od -An -tx1 "$file"); then
+        echo "with-production-env.sh: could not inspect credential '$name' (job '$JOB')" >&2
         exit 1
     fi
+    hex=$(printf '%s' "$od_out" | tr -s ' \n' ' ')
+    case "$hex" in
+        *' 00 '*)
+            echo "with-production-env.sh: credential '$name' (job '$JOB') contains a NUL byte — refusing to export it" >&2
+            exit 1
+            ;;
+    esac
     value=$(cat "$file")
     # A credential containing a newline must never be exported partially
     # or re-interpreted — reject it outright rather than silently

@@ -74,7 +74,7 @@ def test_auto_rollback_returns_to_the_release_that_was_actually_running(clean_re
             f"not {target.release_id}"
         )
 
-        release_ops.rollback(session, release_id=target.release_id)
+        release_ops.rollback(session, release_row_id=target.id)
         session.commit()
 
         assert _status_of(session, "b" * 7) == "current"

@@ -62,6 +62,13 @@ else
 fi
 
 cleanup() {
+    # Every step here is `|| true`: this runs under `set -e`, and inside
+    # the INT/TERM handlers below it runs before `exit 130`/`exit 143` —
+    # a failing `rm` would otherwise abort the handler right there, and
+    # the script would exit with *that* command's status instead of the
+    # signal-derived one, reintroducing the exit-status misattribution
+    # QA-39 exists to close (systemd/journald would again see something
+    # other than "killed by signal" for a drill actually killed by one).
     docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
     # Not just belt-and-suspenders for the normal path (which already
     # removes this once the scratch instance is ready) — also the only
@@ -69,9 +76,9 @@ cleanup() {
     # INT/TERM) before that point is ever reached. `RuntimeDirectory=`
     # teardown handles this on the systemd path regardless, but this
     # shouldn't depend on that.
-    rm -f "${SCRATCH_PASSWORD_FILE:-}"
+    rm -f "${SCRATCH_PASSWORD_FILE:-}" || true
     if [ -n "$_MANUAL_STAGING_DIR" ]; then
-        rm -rf "$_MANUAL_STAGING_DIR"
+        rm -rf "$_MANUAL_STAGING_DIR" || true
     fi
 }
 # A bare `trap cleanup EXIT INT TERM` runs `cleanup` on INT/TERM and then

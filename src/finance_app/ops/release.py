@@ -237,22 +237,34 @@ def mark_failed(session: Session, release: Release, *, reason: str) -> None:
     release.notes = reason[:2000]
 
 
-def rollback(session: Session, *, release_id: str) -> Release:
-    """Promote `release_id` to `current`.
+def rollback(session: Session, *, release_row_id: int) -> Release:
+    """Promote the release identified by `release_row_id` (the `ops.releases.id`
+    primary key) to `current`.
 
-    QA-41: takes the target release id directly rather than re-deriving it
-    via `get_previous` — the caller (`_do_rollback` in `cli.finops`)
-    already resolved and health-verified one specific release via
-    `probe_release` before calling this, in a separate DB session. Calling
-    `get_previous` again here re-runs that same, state-dependent
-    resolution a second time; if `ops.releases` changed during the probe
-    window (an image pull and container start: seconds to minutes — e.g.
-    a concurrent deploy landed and failed), the second resolution can
-    silently disagree with the first, promoting a release that was never
-    actually probed while the CLI still reports the one that was.
-    Resolve once, probe that, promote exactly that — never re-derive.
+    QA-41: takes the target *row* directly rather than re-deriving it via
+    `get_previous` — the caller (`_do_rollback` in `cli.finops`) already
+    resolved and health-verified one specific release via `probe_release`
+    before calling this, in a separate DB session. Calling `get_previous`
+    again here re-runs that same, state-dependent resolution a second
+    time; if `ops.releases` changed during the probe window (an image
+    pull and container start: seconds to minutes — e.g. a concurrent
+    deploy landed and failed), the second resolution can silently
+    disagree with the first, promoting a release that was never actually
+    probed while the CLI still reports the one that was.
 
-    If `release_id` is already `current` (QA-2's failed-deploy/QA-42's
+    Keyed by the primary key rather than `release_id` (the Git SHA) —
+    `ops.releases.release_id` is deliberately **not** unique
+    (`migrations/versions/0004`'s index on it is `unique=False`;
+    `mark_healthy`'s `same_sha_redeploy` handling exists precisely because
+    a SHA can be redeployed and so recur across multiple rows, e.g. one
+    `failed` attempt and one later `current` one). Resolving by
+    `release_id` with an unordered `.first()` could silently promote an
+    older *failed* attempt at the same SHA instead of the row that was
+    actually probed. Resolve once, probe that row's release id, promote
+    that exact row — never re-derive by a value that doesn't uniquely
+    identify it.
+
+    If the target row is already `current` (QA-2's failed-deploy/QA-42's
     pending-deploy case — neither `mark_failed` nor an unresolved
     `pending` row ever demoted it), this is a no-op at the bookkeeping
     level: nothing to promote or demote, it's already the right release.
@@ -262,17 +274,15 @@ def rollback(session: Session, *, release_id: str) -> Release:
     release is demoted and marked `rolled_back` and the target is
     promoted, as before.
 
-    Raises `NoPreviousReleaseError` if `release_id` no longer identifies
-    any tracked release (it was resolved by the caller but has since been
-    removed — not expected in practice, since rows here are never
-    deleted, but this must not silently promote nothing).
+    Raises `NoPreviousReleaseError` if `release_row_id` no longer
+    identifies any tracked release (it was resolved by the caller but has
+    since been removed — not expected in practice, since rows here are
+    never deleted, but this must not silently promote nothing).
     """
-    target = (
-        session.execute(select(Release).where(Release.release_id == release_id)).scalars().first()
-    )
+    target = session.get(Release, release_row_id)
     if target is None:
         raise NoPreviousReleaseError(
-            f"release {release_id!r} is no longer tracked in ops.releases."
+            f"release row {release_row_id!r} is no longer tracked in ops.releases."
         )
     current = get_current(session)
     if current is not None and current.id == target.id:

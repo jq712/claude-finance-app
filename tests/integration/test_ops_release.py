@@ -74,13 +74,54 @@ def test_rollback_promotes_previous_and_marks_current_rolled_back(db_session: Se
     release_ops.mark_healthy(db_session, second)
     db_session.flush()
 
-    promoted = release_ops.rollback(db_session, release_id=first.release_id)
+    promoted = release_ops.rollback(db_session, release_row_id=first.id)
     db_session.flush()
 
     assert promoted.release_id == "1" * 40
     assert _release_id(release_ops.get_current(db_session)) == "1" * 40
     assert second.status == "rolled_back"
     assert second.rolled_back_at is not None
+
+
+def test_rollback_promotes_the_exact_row_probed_not_an_earlier_row_with_the_same_sha(
+    db_session: Session,
+) -> None:
+    """`ops.releases.release_id` (the Git SHA) is deliberately not unique
+    — `migrations/versions/0004`'s index on it is `unique=False` — so a
+    SHA redeployed after an earlier failed attempt at the same SHA
+    produces two rows sharing one `release_id`. `rollback` must promote
+    the exact row `_do_rollback` resolved and probed (identified by
+    `ops.releases.id`), never an arbitrary row that merely shares its
+    SHA: a `.first()` lookup keyed on `release_id` alone could return the
+    older `failed` attempt instead, silently promoting a release that
+    already failed its own health check."""
+    failed_attempt = release_ops.start_deploy(db_session, release_id="x" * 40, image_ref="img:x")
+    release_ops.mark_failed(db_session, failed_attempt, reason="post-deploy health check failed")
+    db_session.flush()
+
+    fixed_retry = release_ops.start_deploy(db_session, release_id="x" * 40, image_ref="img:x")
+    release_ops.mark_healthy(db_session, fixed_retry)
+    db_session.flush()
+
+    later = release_ops.start_deploy(db_session, release_id="y" * 40, image_ref="img:y")
+    release_ops.mark_healthy(db_session, later)
+    db_session.flush()
+
+    previous = release_ops.get_previous(db_session)
+    assert previous is not None
+    assert previous.id == fixed_retry.id
+
+    promoted = release_ops.rollback(db_session, release_row_id=previous.id)
+    db_session.flush()
+
+    assert promoted.id == fixed_retry.id, (
+        "rollback promoted a different row than the one get_previous resolved"
+    )
+    assert _release_id(release_ops.get_current(db_session)) == "x" * 40
+    assert fixed_retry.status == "current"
+    assert failed_attempt.status == "failed", (
+        "the earlier failed attempt at the same SHA must never be silently promoted"
+    )
 
 
 def test_third_consecutive_healthy_deploy_demotes_oldest_to_plain_history(
@@ -118,15 +159,15 @@ def test_get_previous_is_none_after_a_single_deploy(db_session: Session) -> None
     assert release_ops.get_previous(db_session) is None
 
 
-def test_rollback_raises_when_the_target_release_id_is_not_tracked(db_session: Session) -> None:
+def test_rollback_raises_when_the_target_row_is_not_tracked(db_session: Session) -> None:
     """`rollback` no longer resolves its own target (QA-41) — it promotes
-    exactly the `release_id` it's given, which by construction is always
-    one `_do_rollback` already found via `get_previous`. This is the
-    defensive backstop for that contract being violated (a bug, or a
+    exactly the row (`ops.releases.id`) it's given, which by construction
+    is always one `_do_rollback` already found via `get_previous`. This is
+    the defensive backstop for that contract being violated (a bug, or a
     release row deleted between resolution and promotion — rows here are
     never deleted in practice)."""
     with pytest.raises(release_ops.NoPreviousReleaseError):
-        release_ops.rollback(db_session, release_id="9" * 40)
+        release_ops.rollback(db_session, release_row_id=999_999_999)
 
 
 def test_deploy_auto_rollback_then_recovery_still_tracks_last_known_good(

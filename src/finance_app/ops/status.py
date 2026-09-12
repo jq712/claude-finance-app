@@ -64,6 +64,18 @@ def db_status(session: Session) -> dict[str, Any]:
         session.execute(select(1))
         return {"status": "healthy", "detail": None}
     except SASQLOperationalError as exc:
+        # A failed statement leaves the transaction deactivated (Postgres
+        # aborts it on any error) until it's rolled back — the same
+        # reason `migration_status` below rolls back its own
+        # `ProgrammingError`. Without this, the *caller's* next statement
+        # on this session raises `PendingRollbackError` instead of
+        # whatever it was actually trying to do — reachable here because
+        # `aggregate_health`/`deploy_health_check` keep using this session
+        # after calling `db_status`, and `observer_session_scope`'s own
+        # `session.commit()` on a clean exit would otherwise be the thing
+        # that raises, past any caller that already handled the original
+        # "unreachable" result.
+        session.rollback()
         return {"status": "unreachable", "detail": type(exc).__name__}
 
 
