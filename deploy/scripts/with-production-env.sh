@@ -225,7 +225,16 @@ for pair in $(_credential_names); do
         echo "with-production-env.sh: could not inspect credential '$name' (job '$JOB')" >&2
         exit 1
     fi
-    hex=$(printf '%s' "$od_out" | tr -s ' \n' ' ')
+    # Padded with an explicit leading and trailing space, rather than
+    # trusting `od`/`tr`'s own output to already have them at both ends
+    # (QA-43): `$(...)` strips the trailing newline `od` always emits, so
+    # without this padding a NUL as the file's very *last* byte has no
+    # trailing space left for `*' 00 '*` to match against — the one
+    # position a NUL is most likely to actually appear at, since that is
+    # how a C string or a binary-safe secrets tool terminates one. The
+    # leading space worked before only by accident of `od -An`'s own
+    # formatting; this makes both ends correct on purpose.
+    hex=" $(printf '%s' "$od_out" | tr -s ' \n' ' ') "
     case "$hex" in
         *' 00 '*)
             echo "with-production-env.sh: credential '$name' (job '$JOB') contains a NUL byte — refusing to export it" >&2
@@ -260,9 +269,18 @@ for pair in $(_credential_names); do
     # than exporting a value that differs from what the operator recorded
     # out-of-band. Internal whitespace is left alone: nothing here
     # requires a credential to be a single "word".
+    #
+    # Matches every byte the required-credential check below treats as
+    # whitespace (`tr -d '[:space:]'`: space, tab, newline, CR, FF, VT),
+    # not just space and tab (QA-46) — embedded newline and CR are
+    # already rejected above by the time this runs, so FF/VT are the two
+    # this was missing; a value ending in one is exported unchanged
+    # otherwise, the identical corruption whichever byte it is.
     tab="$(printf '\t')"
+    formfeed="$(printf '\f')"
+    vtab="$(printf '\v')"
     case "$value" in
-        " "* | "$tab"* | *" " | *"$tab")
+        " "* | "$tab"* | "$formfeed"* | "$vtab"* | *" " | *"$tab" | *"$formfeed" | *"$vtab")
             echo "with-production-env.sh: credential '$name' (job '$JOB', $env_var) has leading or trailing whitespace — refusing to export it" >&2
             exit 1
             ;;

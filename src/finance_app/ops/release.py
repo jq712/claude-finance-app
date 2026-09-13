@@ -63,6 +63,17 @@ class NoPreviousReleaseError(RuntimeError):
     the operator must fix forward instead."""
 
 
+class RollbackContendedError(RuntimeError):
+    """`rollback` could not safely promote its target (QA-47): either the
+    deploy-promotion advisory lock (QA-3) is held by a concurrent
+    `mark_healthy`, or `current` no longer matches what the caller
+    resolved and health-verified before calling this — a concurrent
+    deploy or rollback landed during the probe window (a `docker compose
+    run` of the release image: seconds to minutes). Promoting anyway
+    would silently discard whatever that concurrent change was. Refuse
+    and let the caller retry once things settle."""
+
+
 def get_current(session: Session) -> Release | None:
     return (
         session.execute(
@@ -237,9 +248,34 @@ def mark_failed(session: Session, release: Release, *, reason: str) -> None:
     release.notes = reason[:2000]
 
 
-def rollback(session: Session, *, release_row_id: int) -> Release:
+def rollback(
+    session: Session, *, release_row_id: int, expected_current_row_id: int | None = None
+) -> Release:
     """Promote the release identified by `release_row_id` (the `ops.releases.id`
     primary key) to `current`.
+
+    QA-47: `mark_healthy` is not the only writer of `status = 'current'` —
+    this function is the other one, and until now it took none of
+    `mark_healthy`'s own protection against a concurrent promotion (QA-3's
+    `pg_try_advisory_xact_lock`). Two gaps, closed together:
+
+    - **Same-instant race**: this now takes the identical advisory lock
+      `mark_healthy` does before touching anything, so the two can never
+      both be mid-promotion at once. Raises `RollbackContendedError`
+      rather than racing if the lock is held.
+    - **Sequential race across the probe window**: the lock alone does not
+      catch a `mark_healthy` that *already completed* (acquired, promoted,
+      committed, released the lock) between when the caller resolved this
+      rollback's target and when it calls this function — exactly the gap
+      `probe_release` opens (a `docker compose run`: seconds to minutes),
+      and exactly what QA-41's row-identity fix did not address (it fixed
+      *which row* gets promoted, not whether `current` is still what it
+      was when that row was chosen). `expected_current_row_id`, when
+      given, is compared against `get_current(session)` freshly read
+      here; a mismatch means something changed `current` since the caller
+      last looked, and this refuses rather than demoting a release it
+      never probed and that may have just passed its own health check.
+      `None` skips the check (the promotion lock alone still applies).
 
     QA-41: takes the target *row* directly rather than re-deriving it via
     `get_previous` — the caller (`_do_rollback` in `cli.finops`) already
@@ -284,7 +320,21 @@ def rollback(session: Session, *, release_row_id: int) -> Release:
         raise NoPreviousReleaseError(
             f"release row {release_row_id!r} is no longer tracked in ops.releases."
         )
+    if not _try_acquire_promotion_lock(session):
+        raise RollbackContendedError(
+            "a concurrent deploy is promoting a release right now; refusing to roll back "
+            "until it finishes — retry once it settles."
+        )
     current = get_current(session)
+    if expected_current_row_id is not None:
+        observed_current_row_id = current.id if current is not None else None
+        if observed_current_row_id != expected_current_row_id:
+            raise RollbackContendedError(
+                "the current release changed since this rollback resolved and health-"
+                f"verified its target (expected current row {expected_current_row_id!r}, "
+                f"found {observed_current_row_id!r}) — a concurrent deploy or rollback "
+                "landed during the probe; refusing to promote over it. Retry."
+            )
     if current is not None and current.id == target.id:
         return target
     if current is not None:

@@ -203,7 +203,11 @@ def restart(
         release_id=release["release_id"], compose_file=compose_file, run_compose_fn=run_compose
     )
     if result["status"] != "healthy":
-        console.print(f"[red]restart failed:[/red] {result}")
+        # Text(): `result` carries `probe_release`'s `detail`, sourced
+        # from the release image's own selfcheck stdout — QA-44, the
+        # same class of hostile content `_emit` already guards against
+        # for read commands (QA-12), reachable here too.
+        console.print("[red]restart failed:[/red]", Text(str(result)))
         raise typer.Exit(1)
     console.print(f"[green]{release['release_id']} is healthy[/green]")
 
@@ -231,7 +235,10 @@ def deploy(
     `<container_image_repo>:<release_id>` to GHCR and the
     production-deploy approval gate has passed (docs/deployment.md)."""
     if not _RELEASE_ID_RE.match(release_id):
-        console.print(f"[red]not a valid release id (expected a Git SHA):[/red] {release_id}")
+        # Text(): `release_id` is the rejected argument itself — the
+        # validator has not yet confirmed it's even hex-shaped, so it may
+        # contain anything, including a closing markup tag (QA-44).
+        console.print("[red]not a valid release id (expected a Git SHA):[/red]", Text(release_id))
         raise typer.Exit(2)
 
     settings = get_settings()
@@ -258,7 +265,12 @@ def deploy(
             release = session.get(Release, release_row_id)
             assert release is not None
             release_ops.mark_failed(session, release, reason=str(exc))
-        console.print(f"[red]deploy failed to start:[/red] {exc}")
+        # Text(): ComposeError's message includes up to 500 chars of
+        # `docker compose`'s own stderr (compose.py), which is not
+        # image-supplied but is still process output outside this
+        # program's control — treated the same as every other probe/
+        # compose-sourced string per QA-44.
+        console.print("[red]deploy failed to start:[/red]", Text(str(exc)))
         raise typer.Exit(1) from exc
 
     try:
@@ -343,10 +355,17 @@ def deploy(
         )
         raise typer.Exit(1) from None
     except RollbackTargetUnhealthyError as exc:
-        console.print(
-            f"[red]automatic rollback target is also unhealthy ({exc}) — manual "
-            "intervention required.[/red]"
-        )
+        # Text(): `exc`'s message embeds the rollback target's probe
+        # payload — the same hostile-content class as `health` above
+        # (QA-44), and arguably the worst place to crash: the deploy
+        # already failed, the auto-rollback target failed too, and this
+        # is the one line that tells the operator production needs
+        # hands on it.
+        console.print("[red]automatic rollback target is also unhealthy[/red]", Text(str(exc)))
+        console.print("[red]manual intervention required.[/red]")
+        raise typer.Exit(1) from None
+    except release_ops.RollbackContendedError as exc:
+        console.print(f"[red]automatic rollback could not complete safely:[/red] {exc}")
         raise typer.Exit(1) from None
     except typer.Exit:
         # See the matching guard above `deploy_health_check`'s catch-all:
@@ -379,19 +398,36 @@ def rollback(
     confirming the previous release's image still selfchecks healthy and
     flipping `ops.releases` bookkeeping back to it."""
     try:
-        released_id = _do_rollback(compose_file)
+        released_id, changed = _do_rollback(compose_file)
     except release_ops.NoPreviousReleaseError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     except RollbackTargetUnhealthyError as exc:
-        console.print(f"[red]rollback target is not healthy:[/red] {exc}")
+        # Text(): see the matching guard in `deploy`'s auto-rollback
+        # handler — `exc` embeds the target's probe payload (QA-44).
+        console.print("[red]rollback target is not healthy:[/red]", Text(str(exc)))
         raise typer.Exit(1) from exc
+    except release_ops.RollbackContendedError as exc:
+        console.print(f"[red]rollback could not complete safely:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if not changed:
+        # QA-48: the resolved target was already `current` (the QA-2/
+        # QA-42 no-op case) — ADR-016 D2 removed the `docker compose up`
+        # step that used to make this branch do *something*, so nothing
+        # was promoted or demoted and no bookkeeping changed. A narrow,
+        # auditable production interface must not report a state change
+        # it did not make.
+        console.print(f"[yellow]{released_id} is already current — nothing to roll back.[/yellow]")
+        return
     console.print(f"[green]rolled back to {released_id}[/green]")
 
 
-def _do_rollback(compose_file: str) -> str:
+def _do_rollback(compose_file: str) -> tuple[str, bool]:
     """Shared rollback mechanics for `deploy`'s auto-rollback path and the
-    `rollback` command. Returns the release id now current.
+    `rollback` command. Returns `(release id now current, changed)` —
+    `changed` is `False` for the QA-2/QA-42 case where the resolved
+    target was already `current` (nothing to promote or demote; see
+    `release_ops.rollback`'s no-op branch).
 
     ADR-016 D2: there is no long-running `app` process to bring back up —
     the previous `up -d app` step here started a one-shot container that
@@ -411,6 +447,16 @@ def _do_rollback(compose_file: str) -> str:
         # guarantees the release promoted below is the exact one just
         # probed, not merely one that happens to share its SHA.
         target_row_id = previous.id
+        # QA-47/QA-48: what `current` resolved to at the same moment as
+        # the target — passed through to `release_ops.rollback` so it can
+        # refuse if that's changed by the time it actually promotes
+        # (QA-47), and used here to tell a genuine rollback apart from
+        # the QA-2/QA-42 no-op where the target already *is* current
+        # (QA-48) without needing a second query after the fact.
+        current_at_resolution = release_ops.get_current(session)
+        expected_current_row_id = (
+            current_at_resolution.id if current_at_resolution is not None else None
+        )
 
     health = status.probe_release(
         release_id=target_release_id, compose_file=compose_file, run_compose_fn=run_compose
@@ -421,10 +467,14 @@ def _do_rollback(compose_file: str) -> str:
     # QA-41: promotes exactly the row that was just probed, never
     # re-derived — see `release_ops.rollback`'s docstring for why a second
     # `get_previous` resolution here could silently disagree with the
-    # first one.
+    # first one. `expected_current_row_id` closes the sequential half of
+    # that same race (QA-47) — see that function's docstring.
     with session_scope() as session:
-        release_ops.rollback(session, release_row_id=target_row_id)
-    return target_release_id
+        release_ops.rollback(
+            session, release_row_id=target_row_id, expected_current_row_id=expected_current_row_id
+        )
+    changed = target_row_id != expected_current_row_id
+    return target_release_id, changed
 
 
 if __name__ == "__main__":
