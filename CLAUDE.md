@@ -74,6 +74,7 @@ Use the subagents in `.claude/agents/` for their specialties. Never let the suba
 
 ## Working agreements
 
+- PR #15 (`rebuild-autonomous-engineering-workflow`) is Jordan working solo — do not pick it up, review it, or merge it unless explicitly asked. Remove this note once that PR is closed.
 - Branch per unit of work; PR into `main`. No direct commits to `main`.
 - `uv` for dependency and environment management.
 - `ruff format` + `ruff check` + `pyright` must be clean before a change is done.
