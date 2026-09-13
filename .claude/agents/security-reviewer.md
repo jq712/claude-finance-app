@@ -25,6 +25,8 @@ Read `docs/security-model.md` and handoff §4 before reviewing. Those invariants
 
 **Infrastructure.** Container user and capabilities, file permissions on credential material, network exposure — only the webhook port should be publicly reachable, never the CLI or PostgreSQL. Deployment credentials scoped to deployment only. Dependency and action pinning.
 
+**Release identity.** For any health/verification check that claims to confirm "the right release is running": does it trace to something the image actually carries (a build-time identity), or does it just compare a runtime-injected value against itself echoed back — which proves nothing about what's actually running? A tautological self-check reporting a wrong image as healthy is a real defect class found in this project's own deploy topology (PR #13 round 3); treat any new "verify deployed identity" logic as guilty until it demonstrates it can actually fail.
+
 **Backups.** Encrypted before leaving the VPS. Restore actually tested, not assumed.
 
 ## Output

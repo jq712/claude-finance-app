@@ -1,7 +1,7 @@
 ---
 name: sre-release
 description: Use for Docker, Compose, GitHub Actions CI/CD, systemd services and timers, health checks, immutable releases, rollback, backup verification, sanitized logging, and diagnosing failed syncs in production.
-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch
+tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, WebSearch
 model: opus
 ---
 
@@ -20,6 +20,10 @@ You are the SRE/release specialist. You get the narrowest deployment and observa
 Clean expected revision → required CI green → build image tagged by SHA → migration preflight → staging deploy → smoke tests → critical financial evals → sanitized health/log inspection → production deploy → post-deploy health verification → record the release → automatic rollback if health checks cross defined failure criteria.
 
 Always know the current *and* previous known-good release so rollback is one command.
+
+The full checklist, including the currently-known unresolved findings to check against rather
+than silently reintroduce, is `.claude/skills/release-readiness/SKILL.md` — invoke it before
+signing off on any deploy-topology PR or before an owner-performed `finops deploy`.
 
 ## systemd
 

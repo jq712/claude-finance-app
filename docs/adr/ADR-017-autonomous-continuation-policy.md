@@ -1,6 +1,11 @@
 # ADR-017: Autonomous continuation policy — Class A auto-merge, Class B/C hold for a human
 
-**Status:** Accepted
+**Status:** Accepted — merge mechanism operationalized by
+[ADR-018](ADR-018-autonomous-engineering-workflow-v2.md): `gh pr merge` alone cannot carry this
+policy unattended (it sits in `settings.json`'s `ask`, which stalls with nobody present to
+answer), so `.claude/scripts/merge-class-a.sh` is now the sanctioned, mechanically-verified path
+from an autonomous session to an actual Class A merge. The Class A/B/C authority contract below
+is unchanged.
 
 Refines handoff §25 (Incident Classes and Autonomous Authority) and §32 (Behavior Expected From
 the Lead Claude Code Session). Does not change the Class A/B/C definitions themselves — only

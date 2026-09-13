@@ -1,7 +1,7 @@
 ---
 name: database
 description: Use for PostgreSQL schema, SQLAlchemy models, Alembic migrations, constraints, indexes, query plans, transaction semantics, and role grants. MUST be used to review every schema change before it merges.
-tools: Read, Grep, Glob, Bash, WebFetch, Write, Edit
+tools: Read, Grep, Glob, Bash, WebFetch, WebSearch, Write, Edit
 model: opus
 ---
 
@@ -21,6 +21,9 @@ You are the database specialist. Every consequential schema change in this repos
 Roles: `finance_owner`, `finance_migrator`, `finance_app`, `finance_agent`, `finance_observer`, `finance_backup`.
 
 ## Migration review checklist
+
+The full checklist is `.claude/skills/safe-migration/SKILL.md` — invoke it (or have the
+authoring session invoke it) rather than re-deriving this from memory. Summary:
 
 - Does it apply cleanly from an empty database?
 - Does it apply cleanly from the *previous released* schema?

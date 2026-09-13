@@ -23,3 +23,4 @@ Format: **Context** (what forced the decision) · **Decision** (what we chose) �
 | [015](ADR-015-backup-encryption-gpg-symmetric.md) | Backup encryption via GPG symmetric encryption, keyed by a single systemd credential |
 | [016](ADR-016-production-deployment-control-plane.md) | Production deployment control plane: Compose interpolation, no long-running `app` until Milestone 8, and release-promotion concurrency |
 | [017](ADR-017-autonomous-continuation-policy.md) | Autonomous continuation policy: Class A auto-merge, Class B/C hold for a human, merge is never deploy |
+| [018](ADR-018-autonomous-engineering-workflow-v2.md) | Autonomous engineering workflow v2: refreshed agent roster, five Skills, a mechanical Class-A merge gate, and worktree/headless conventions — supersedes handoff §12/§14/§15 |

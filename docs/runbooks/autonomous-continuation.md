@@ -1,28 +1,19 @@
 # Runbook: autonomous continuation sessions
 
-Operational companion to [ADR-017](../adr/ADR-017-autonomous-continuation-policy.md). That ADR
-sets the policy (Class A auto-merges, Class B/C wait for the owner); this runbook is what to
-actually look at, whether the session was started interactively, resumed, or by a scheduled
-`RemoteTrigger` routine.
+Operational companion to [ADR-017](../adr/ADR-017-autonomous-continuation-policy.md) and
+[ADR-018](../adr/ADR-018-autonomous-engineering-workflow-v2.md). Those set the policy and the
+mechanism (Class A auto-merges via a mechanical gate, Class B/C wait for the owner); this
+runbook is what *you*, the owner, actually look at afterward — whether the session was started
+interactively, resumed, or by a scheduled routine.
 
 ## What a session does under this policy
 
-Given the handoff §34 continuation prompt (or a scheduled routine configured with it), a
-session:
-
-1. Inventories the repo against `CLAUDE_FINANCE_APP_HANDOFF.md` from the first incomplete
-   milestone step.
-2. Implements the next coherent unit of work on a branch.
-3. For a Class A change: gets required CI green, confirms via `gh pr checks` (never on
-   red/pending/missing), and merges to `main` itself.
-4. For a Class B change: implements it fully, including independent `security-reviewer` /
-   `qa-adversarial` review (separate invocations, per CLAUDE.md's delegation rule), opens the
-   PR — and stops. It does not merge.
-5. For a Class C condition or any handoff §32 blocker with nobody present to answer: stops
-   cleanly and leaves a note (PR description, commit message, or GitHub issue) rather than
-   idling or guessing.
-6. Never touches production. `finops deploy`/`rollback` stay an owner-performed action
-   regardless of class (ADR-017) — there is no production VPS yet either way.
+This procedure now lives in one place — the `autonomous-continuation` Skill
+(`.claude/skills/autonomous-continuation/SKILL.md`) — not here. Read it there; this runbook
+intentionally does not restate it, so the contract only has to change in one place (ADR-018 §2).
+In one line: inventory the repo, classify the next unit of work, implement it, review it
+(fresh-context, every class), and end the run as a Class A merge, an open Class B PR, or a
+durable note — never an idle wait.
 
 ## What to check after a run
 
@@ -53,6 +44,6 @@ exists:
 - Pause it by disabling the routine (`{action: "update", trigger_id: ..., body: {"enabled":
   false}}`) rather than deleting it — routines can't be deleted via the API; use
   `https://claude.ai/code/routines` for that.
-- The routine's prompt should point at the handoff's §34 continuation prompt and this ADR —
-  it should not restate the autonomy contract independently, so the contract only has to be
-  changed in one place if it's ever revised.
+- The routine's prompt should point at the `autonomous-continuation` Skill — it should not
+  restate the autonomy contract independently, so the contract only has to be changed in one
+  place if it's ever revised.

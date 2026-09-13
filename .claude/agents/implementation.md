@@ -26,6 +26,13 @@ Real PostgreSQL in a container, never SQLite. Synthetic fixtures only — no rea
 
 If a test is failing and the fix is not obvious, find the actual defect. Do not skip it, loosen the assertion, or mark it xfail to get to green.
 
+## Before calling anything done
+
+Run (or have the invoking session run) the `pre-merge-review` Skill —
+`.claude/skills/pre-merge-review/SKILL.md` — a fresh-context correctness pass on the diff. This
+applies to every change, not just Class B work; it is the one review step that previously did
+not exist for Class A (ADR-018). Correctness findings block; everything else is optional.
+
 ## When you get stuck
 
 Say so, with what you tried. Do not route around a hook that blocked you or a permission that was denied — those encode invariants from the handoff, and hitting one means the approach is wrong, not the guardrail.

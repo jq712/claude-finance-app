@@ -742,6 +742,15 @@ Verify the exact `.claude/` config surface against the installed Claude Code ver
 
 ## 12. Autonomous Claude Code Engineering Organization
 
+> **Superseded by [ADR-018](docs/adr/ADR-018-autonomous-engineering-workflow-v2.md)** (2026-09,
+> after Milestone 6). The specific prescription below — "one primary orchestrator plus ephemeral
+> specialists" as a constraint against Skills, worktrees, and other native Claude Code
+> mechanisms — was a reasonable pre-code default and is no longer this project's policy. ADR-018
+> kept the specialist roster this section describes (it was structurally right) but refreshed
+> each specialist's content against six milestones of operating history, added five Skills for
+> recurring procedures, and formalized worktree-based parallel work. Read ADR-018 first; treat
+> the rest of this section as the historical starting point it refined, not the current rule.
+
 Use one primary orchestrator plus ephemeral specialists, not a permanently chatting swarm.
 
 Each specialist below should be a Claude Code subagent defined in `.claude/agents/<name>.md`, with frontmatter declaring its description, model, and — importantly — the narrowest tool set that lets it do its job. Review-oriented subagents should not carry write tools.
@@ -919,6 +928,17 @@ Back the `NEVER` list with mechanical enforcement wherever possible — `.claude
 
 ## 14. Claude Code Skills / Reusable Workflows
 
+> **Superseded by [ADR-018](docs/adr/ADR-018-autonomous-engineering-workflow-v2.md)** (2026-09).
+> This section's "do not create a Skill until the underlying workflow works manually/reliably"
+> gate was the right conservative default at Milestone 0, with zero operating history to draw
+> on. It no longer is: six milestones of real usage (and one real incident from an undocumented
+> ad hoc workflow — ADR-018's context section) produced concrete, provenly-needed checklists
+> that were sitting as prose scattered across agent prompts, ADRs, and runbooks instead of a
+> single load-bearing procedure. ADR-018 ships five Skills in `.claude/skills/` on that basis:
+> `autonomous-continuation`, `safe-migration`, `plaid-sync-review`, `release-readiness`, and
+> `pre-merge-review`. The candidate list and the production-release outline below were a
+> reasonable early guess; ADR-018 §3 is the current, actually-implemented set.
+
 After workflows stabilize, package recurring procedures as Claude Code Skills in `.claude/skills/`, committed to the repository so every session and subagent inherits them.
 
 Good candidates:
@@ -954,6 +974,18 @@ Do not create a Skill until the underlying workflow works manually/reliably.
 ---
 
 ## 15. MCP, Hooks, and External Tools Policy
+
+> **Superseded by [ADR-018](docs/adr/ADR-018-autonomous-engineering-workflow-v2.md)** (2026-09).
+> The owner waived this section's blanket "avoid MCP, no second orchestration layer" framing for
+> that ADR's redesign — but the redesign still added zero MCP servers and no second
+> orchestration layer, because this section's *underlying test* ("prove native tooling
+> insufficient first") wasn't actually invalidated by the waiver, only the blanket-avoidance
+> policy was. ADR-018's "What we deliberately did not add" section reasons through every MCP
+> candidate considered (GitHub, documentation search, production observability) and rejects each
+> one with a specific reason. The hooks guidance below is unaffected and was extended, not
+> superseded: ADR-018 §4 adds a new hook (`guard-protected-branch.sh`) on exactly this section's
+> own principle ("prefer a hook over an instruction whenever the rule must hold even if the
+> model forgets it").
 
 Use MCP selectively.
 

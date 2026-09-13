@@ -72,11 +72,11 @@ The next task is finishing Milestone 7 (production deployment) on `milestone-7-p
 Continue executing CLAUDE_FINANCE_APP_HANDOFF.md from the first incomplete milestone.
 ```
 
-This runs under the standing autonomy contract in [ADR-017](docs/adr/ADR-017-autonomous-continuation-policy.md): Class A changes get implemented and merged autonomously once CI is green; Class B changes get implemented and reviewed but wait as an open PR for you to merge; Class C stops and leaves a note. Applies the same way whether the session is interactive or a scheduled routine — see [`docs/runbooks/autonomous-continuation.md`](docs/runbooks/autonomous-continuation.md) for what to check after a run.
+That prompt is what triggers the `autonomous-continuation` Skill (`.claude/skills/autonomous-continuation/SKILL.md`), which is now the single source of truth for the procedure — read it there rather than here. In short: Class A changes get implemented and merged autonomously, through a mechanical gate that re-verifies CI is actually green (`.claude/scripts/merge-class-a.sh`, [ADR-018](docs/adr/ADR-018-autonomous-engineering-workflow-v2.md) §6); Class B changes get implemented and reviewed but wait as an open PR for you to merge; Class C stops and leaves a note. Applies the same way whether the session is interactive or a scheduled routine — see [`docs/runbooks/autonomous-continuation.md`](docs/runbooks/autonomous-continuation.md) for what to check after a run, and [ADR-017](docs/adr/ADR-017-autonomous-continuation-policy.md) for the underlying policy.
 
 ## Guardrails you will hit
 
-`.claude/settings.json` denies reads of credential paths and blocks `ssh`/`scp` — the engineering environment has no path to production. A `PreToolUse` hook refuses edits to committed Alembic migrations; corrections go forward as new revisions. These encode invariants from handoff §4. If one blocks you, the approach is wrong, not the guardrail.
+`.claude/settings.json` denies reads of credential paths and blocks `ssh`/`scp` — the engineering environment has no path to production. A `PreToolUse` hook refuses edits to committed Alembic migrations; corrections go forward as new revisions. Another refuses a direct commit or push to `main` — branch per unit of work, PR in. These encode invariants from handoff §4 and CLAUDE.md's working agreements. If one blocks you, the approach is wrong, not the guardrail.
 
 ## Security
 

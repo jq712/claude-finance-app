@@ -68,9 +68,38 @@ The runtime financial agent gets **semantic, parameterized tools** only — `get
 
 Class A auto-merge is the standing default whenever a session is asked to continue the milestone backlog autonomously (handoff §34) — interactive, resumed, or scheduled makes no difference. Full contract, including what to do when nobody is present to answer a blocker: ADR-017 and handoff §32.
 
+**The merge itself is mechanical, not just a judgment call**: `gh pr merge` sits in `settings.json`'s `ask` — the sanctioned path from an autonomous session to an actual Class A merge is `.claude/scripts/merge-class-a.sh <PR>`, which independently re-verifies mergeable state, that every required check is actually green, and that the diff doesn't touch a path this repo treats as inherently non-Class-A (migrations, `deploy/`, `.claude/`, ADRs, the Plaid/agent boundaries, or the rule-defining docs themselves) before it merges anything. See ADR-018 §6.
+
 ## Delegation
 
-Use the subagents in `.claude/agents/` for their specialties. Never let the subagent that wrote a Class B change be the one that approves it — spawn `security-reviewer` and `qa-adversarial` as separate invocations. Review subagents have no write tools by design.
+Use the subagents in `.claude/agents/` for their specialties: `architecture`, `database`,
+`implementation`, `qa-adversarial`, `security-reviewer`, `sre-release` — see
+`docs/adr/ADR-018-autonomous-engineering-workflow-v2.md` §1 for what each one covers, its tool
+grants, and why. Never let the subagent that wrote a Class B change be the one that approves it —
+spawn `security-reviewer` and `qa-adversarial` as **parallel** invocations (one message, both
+calls) so independence doesn't cost wall-clock time. Review subagents have no write tools by
+design.
+
+Use the Skills in `.claude/skills/` for recurring procedures instead of re-deriving them from
+memory each time: `autonomous-continuation` (backlog pickup, classification, session lifecycle),
+`safe-migration`, `plaid-sync-review`, `release-readiness`, and `pre-merge-review` (mandatory
+fresh-context correctness pass before any unit of work — Class A included — is called done).
+
+## Context discipline
+
+- **What must survive compaction**: current branch, modified files, open PR links, this unit of
+  work's risk class, and the exact test commands already run. Re-query these from `git`/`gh`
+  (`git status`, `git diff`, `gh pr list`, `gh pr view`) rather than trusting recollection —
+  they're the actual source of truth, before or after compaction.
+- **Delegate research, don't inline it.** Understanding an unfamiliar module, verifying a
+  Claude Code/Plaid/GitHub Actions API detail (handoff §32), or any multi-file investigation
+  belongs in a subagent or fork, not read wholesale into the lead session's own context.
+- **Plan mode** for multi-file or architecturally uncertain work; **direct execution** for a
+  single-file, well-scoped, low-risk change. Don't plan-mode a one-line fix; don't skip planning
+  a multi-module change to move faster.
+- **Fresh-context correctness review is mandatory before "done"** — the `pre-merge-review` Skill,
+  scoped to correctness findings only. Every other finding class (style, simplification, reuse,
+  efficiency) is explicitly optional and non-blocking.
 
 ## Working agreements
 
@@ -83,7 +112,7 @@ Use the subagents in `.claude/agents/` for their specialties. Never let the suba
 
 ## Definition of done
 
-Implementation · types/lint clean · unit tests · integration tests · migration if schema changed · agent eval if prompts or tools changed · docs updated if behavior changed · runbook updated if operations changed · **`README.md`'s Status line updated if this PR completes or begins a milestone** (CI's `docs-freshness` job checks this mechanically for milestone-titled/milestone-branched PRs — it has gone stale before, don't rely on memory) · CI green · no new secrets · clear rollback path.
+Implementation · types/lint clean · unit tests · integration tests · migration if schema changed · agent eval if prompts or tools changed · docs updated if behavior changed · runbook updated if operations changed · **`README.md`'s Status line updated if this PR completes or begins a milestone** (CI's `docs-freshness` job checks this mechanically for milestone-titled/milestone-branched PRs — it has gone stale before, don't rely on memory) · fresh-context correctness review via `.claude/skills/pre-merge-review` (every class, not just Class B) · CI green · no new secrets · clear rollback path.
 
 ## Commands
 

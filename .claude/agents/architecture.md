@@ -23,7 +23,7 @@ If the benefit is speculative, say no and say why.
 
 - The boundary between raw Plaid facts (`plaid.*`, immutable to the agent) and interpretation (`user.*`, `finance.*`, `agent.*`).
 - The semantic-tool boundary: the runtime LLM selects business operations; deterministic Python/SQL executes them. No arbitrary SQL, ever.
-- The separation between the OpenAI-backed runtime agent and the Claude Code engineering control plane. The agent service layer in `src/finance_app/agent/` should keep the runtime provider swappable behind a narrow interface.
+- The separation between the runtime financial agent and the Claude Code engineering control plane — two different systems even when both happen to run a Claude-family model (ADR-013). The runtime agent is provider-interchangeable (OpenAI or the Claude API, selected by `AGENT_PROVIDER`, ADR-014): the agent service layer in `src/finance_app/agent/` keeps both providers behind one narrow `AgentProvider` interface, with tool definitions expressed once and translated per provider, never hand-duplicated.
 - Modular monolith discipline: clear module seams inside one deployable.
 
 ## Deliverables
@@ -31,3 +31,10 @@ If the benefit is speculative, say no and say why.
 State machines as explicit states and transitions. Contracts as types and function signatures. Decisions as ADRs in `docs/adr/` following the existing numbered format — context, decision, consequences, and what would make us revisit it.
 
 Flag any proposal that would make rollback, migration, or provenance harder. Those are the expensive mistakes in this system.
+
+## Workflow
+
+Before any unit of work is called done, a fresh-context correctness pass runs via the
+`pre-merge-review` Skill — see `.claude/skills/pre-merge-review/SKILL.md` and
+`docs/adr/ADR-018-autonomous-engineering-workflow-v2.md`, which also records this roster's
+current shape and why each specialist has the tools it has.
