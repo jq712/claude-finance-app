@@ -89,6 +89,17 @@ class Settings(BaseSettings):
     # from a release image" (e.g. local dev), in which case `finops
     # version`/health reporting falls back to __version__.
     release_id: str = ""
+    # QA-37: baked into the image at build time (Dockerfile `ARG RELEASE_ID`
+    # + `ENV IMAGE_RELEASE_ID=$RELEASE_ID`), never set by
+    # `deploy/compose.yaml` — unlike `release_id` above, which is merely
+    # the `RELEASE_ID` *environment variable* `docker compose run` was
+    # invoked with, and which `probe_release` itself sets before every
+    # selfcheck run, this value cannot be influenced by the process that
+    # starts the container. `probe_release`'s `wrong_image` check compares
+    # this against the requested release id; comparing `release_id`
+    # instead (as it used to) can never disagree with what was just
+    # injected, so it could never actually detect a wrong image.
+    image_release_id: str = ""
     # `ghcr.io/<owner>/<repo>` — CI publishes `container_image_repo:<sha>`
     # (.github/workflows/ci.yml); `finops deploy`/`rollback` build the full
     # image ref from this plus a release id.

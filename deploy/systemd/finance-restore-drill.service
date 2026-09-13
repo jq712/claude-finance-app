@@ -9,8 +9,15 @@ Type=oneshot
 WorkingDirectory=/opt/finance-app
 
 # See finance-app.service for rationale -- same sandboxing profile for
-# this unit's `docker compose`/restore-verify.sh invocation. PrivateTmp
-# is compatible with restore-verify.sh's `mktemp` scratch-password file.
+# this unit's `docker compose`/restore-verify.sh invocation.
+#
+# ADR-016 D7: `PrivateTmp=true` namespaces `/tmp`/`/var/tmp` only — the
+# Docker *daemon* (outside this unit's mount namespace) cannot resolve a
+# path under this unit's private `/tmp`, so `restore-verify.sh`'s
+# scratch password file is staged under `RuntimeDirectory=` instead
+# (created in the *host* mount namespace, removed automatically when
+# this unit stops) and the containing directory — never a single file —
+# is what gets bind-mounted. See restore-verify.sh for the mechanics.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -19,16 +26,18 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+RuntimeDirectory=finance-app-restore-drill
+RuntimeDirectoryMode=0700
 
-LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
-LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
-LoadCredentialEncrypted=finance_agent_db_password:/etc/finance-app/credentials/finance_agent_db_password.cred
-LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred
+# ADR-016 D1: trimmed to exactly the `restore-drill` job's set (identical
+# to `backup`'s — restoring and verifying a backup needs the same three
+# credentials creating one does).
 LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
+LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
 LoadCredentialEncrypted=backup_encryption_key:/etc/finance-app/credentials/backup_encryption_key.cred
 EnvironmentFile=-/etc/finance-app/env
 
 Environment=COMPOSE_FILE=/opt/finance-app/deploy/compose.yaml
-ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh /opt/finance-app/deploy/scripts/restore-verify.sh
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh restore-drill -- /opt/finance-app/deploy/scripts/restore-verify.sh
 
 TimeoutStartSec=900

@@ -29,7 +29,18 @@ class ComposeError(RuntimeError):
     """A `docker compose` invocation failed. Message is built only from
     argv and stderr — both already argv-safe, no secrets pass through
     compose invocations (those come from systemd credentials at container
-    start, not CLI arguments)."""
+    start, not CLI arguments).
+
+    `stdout` carries whatever the process wrote before it exited non-zero,
+    if any — `ops.status.probe_release` needs this: a `finance selfcheck`
+    run that reports itself unhealthy still exits 1 (`ops.compose.run_compose`
+    treats it as `ComposeError` since `check=True`), but its JSON payload on
+    stdout is real diagnostic data, not a docker/compose failure, and must
+    not be discarded."""
+
+    def __init__(self, message: str, *, stdout: str = "") -> None:
+        super().__init__(message)
+        self.stdout = stdout
 
 
 def compose_command(compose_file: str, *args: str) -> list[str]:
@@ -40,6 +51,7 @@ def run_compose(
     compose_file: str,
     *args: str,
     env: dict[str, str] | None = None,
+    timeout: float | None = None,
     runner: Runner = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
     """`env` is *merged onto* the current process environment, never
@@ -49,17 +61,41 @@ def run_compose(
     needs to interpolate). Callers pass only the deploy-specific overlay
     (e.g. `{"RELEASE_ID": release_id}`); the credentials
     `deploy/scripts/with-production-env.sh` exported into this process's
-    environment survive into the child unchanged."""
+    environment survive into the child unchanged.
+
+    `timeout` (ADR-016 D3) bounds the call so a hung `docker compose` —
+    e.g. `probe_release`'s one-shot selfcheck run against a release that
+    never comes up — cannot hang `finops deploy` indefinitely; a
+    `subprocess.TimeoutExpired` surfaces as `ComposeError` like any other
+    failure."""
     command = compose_command(compose_file, *args)
     merged_env = {**os.environ, **(env or {})}
     try:
-        return runner(command, env=merged_env, text=True, capture_output=True, check=True)
+        return runner(
+            command, env=merged_env, text=True, capture_output=True, check=True, timeout=timeout
+        )
     except subprocess.CalledProcessError as exc:
         raise ComposeError(
-            f"{' '.join(command)} failed (exit {exc.returncode}): {exc.stderr[:500]}"
+            f"{' '.join(command)} failed (exit {exc.returncode}): {exc.stderr[:500]}",
+            stdout=exc.stdout or "",
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ComposeError(f"{' '.join(command)} timed out after {timeout}s") from exc
     except FileNotFoundError as exc:
         raise ComposeError(
             "docker CLI not found — finops deploy/rollback/restart must run on a host "
             "with Docker installed (the VPS), not inside the engineering environment."
         ) from exc
+    except OSError as exc:
+        # QA-38: a `PermissionError` (docker socket not accessible), a
+        # `UnicodeDecodeError` (`text=True` decodes strictly, so one
+        # non-UTF-8 byte anywhere on the release image's stdout raises
+        # instead of returning), or a bare `OSError` from fork/posix_spawn
+        # would otherwise escape past every `except ComposeError` in the
+        # deploy path (`cli/finops.py`'s `deploy`, `ops/status.py`'s
+        # `probe_release`) as a raw traceback, leaving the release
+        # `pending` with no auto-rollback attempted. `UnicodeDecodeError`
+        # is a `ValueError`, not an `OSError`, so it needs its own clause.
+        raise ComposeError(f"{' '.join(command)} failed: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ComposeError(f"{' '.join(command)} produced undecodable output: {exc}") from exc

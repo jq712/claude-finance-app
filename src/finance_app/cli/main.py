@@ -1,4 +1,5 @@
 import datetime
+import json
 
 import typer
 from anthropic import AnthropicError
@@ -29,6 +30,7 @@ from finance_app.config.settings import MissingProviderCredentialError, get_sett
 from finance_app.db.models.agent import Conversation
 from finance_app.db.models.plaid import Account, Item, SyncState
 from finance_app.db.session import session_scope
+from finance_app.ops.selfcheck import selfcheck as _selfcheck
 from finance_app.plaid.sync import PlaidSyncError, run_daily_sync
 
 app = typer.Typer(
@@ -100,6 +102,33 @@ def status() -> None:
         console.print(
             f"sync: {sync_state.status}, last successful: {sync_state.last_successful_at}"
         )
+
+
+@app.command()
+def selfcheck(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Deterministic post-deploy smoke check (ADR-016 D3): database
+    reachable, this image's migration head matches what's applied. Exits
+    0 iff `overall == "healthy"`; never 0 on a database or migration
+    problem, unlike `finance status` above, which always exits 0 so it
+    stays useful for basic inspection. `finops deploy` runs this via
+    `docker compose run --rm app finance selfcheck --json` against the
+    exact image being deployed (`ops.status.probe_release`) — the deploy
+    container itself is pinned to the *previous* release and can never
+    answer this."""
+    result = _selfcheck()
+    if json_output:
+        print(json.dumps(result))
+    else:
+        console = Console()
+        console.print(f"release: {result['release_id']}, app: {result['app_version']}")
+        console.print(f"database: {result['database']['status']}")
+        console.print(
+            f"migrations: {result['migrations']['status']} "
+            f"(applied={result['migrations']['applied']}, head={result['migrations']['head']})"
+        )
+        console.print(f"overall: {result['overall']}")
+    if result["overall"] != "healthy":
+        raise typer.Exit(1)
 
 
 @app.command()

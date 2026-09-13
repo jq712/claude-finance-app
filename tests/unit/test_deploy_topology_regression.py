@@ -1,41 +1,102 @@
 """Adversarial regression tests for the *deployed* topology
-(QA round 2, Milestone 7 — handoff §19/§20, ADR-007, ADR-008).
+(QA round 2 + round 3, Milestone 7 — handoff §19/§20, ADR-007, ADR-008,
+ADR-016).
 
 Round 1 (`tests/unit/test_ops_compose_env_regression.py`) proved that
-`run_compose` merges rather than replaces the environment. That fix is
-correct in isolation but was verified against the *pytest* process's
-environment, which `tests/conftest.py` pre-seeds with every
-`FINANCE_*_DB_PASSWORD`/`PLAID_*` value via `os.environ.setdefault`. The
-environment that actually matters is the one inside the `deploy` Compose
-service, which is where `deploy/scripts/finops.sh` and
-`docs/runbooks/deploy.md` say `finops deploy`/`rollback`/`restart` run —
-and that environment is built solely from the `deploy` service's own
-`environment:` block in `deploy/compose.yaml`.
+`run_compose` merges rather than replaces the environment. Round 2 found
+three defects in the pre-ADR-016 topology (all fixed by ADR-016's D1/D2/D7)
+and one probe design flaw (QA-26, fixed by D3's `probe_release`). Round 3
+found that ADR-016's own D1 implementation (`deploy/scripts/
+with-production-env.sh`) introduced two new defects of its own — a
+plaintext credential temp file that survived `exec` (never cleaned up) and
+a credential-content round-trip that could inject one job's variable into
+another's or silently truncate a multi-line value — and that the drift
+test this file promises (compose.yaml's and with-production-env.sh's own
+comments both point here) had never actually been written, so none of this
+was mechanically enforced.
 
-Every test here encodes a defect confirmed against real Docker / real
-`docker compose` on this branch. Marked `xfail(strict=True)` so the suite
-stays green until the implementation is fixed and then fails loudly
-(XPASS) the moment it is — delete the marker then, not the test.
-
-These are deliberately static/config-shape assertions (no Docker daemon
-required) so they run in CI's `unit-tests` job, which is the gate that
-should have caught all three before this branch reached a VPS.
+This file is now that drift test, plus direct regression coverage for
+every defect found so far. Static/config-shape assertions run with no
+Docker daemon required (CI's `unit-tests` job); the drift test and the
+wrapper-behavior tests below execute the real `with-production-env.sh`
+under `/bin/sh` against a synthetic `$CREDENTIALS_DIRECTORY` — still no
+Docker, no systemd, no real credentials, but real shell semantics instead
+of a regex guess at them.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from finance_app.ops.compose import ComposeError
+from finance_app.ops.status import probe_release
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILE = _REPO_ROOT / "deploy" / "compose.yaml"
+_WRAPPER = _REPO_ROOT / "deploy" / "scripts" / "with-production-env.sh"
 _RESTORE_DRILL_UNIT = _REPO_ROOT / "deploy" / "systemd" / "finance-restore-drill.service"
 _RESTORE_VERIFY_SCRIPT = _REPO_ROOT / "deploy" / "scripts" / "restore-verify.sh"
 
 # `${NAME:?message}` — a variable Compose refuses to interpolate without.
 _REQUIRED_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+):\?")
+_CREDENTIAL_VAR_REF_RE = re.compile(r"\$\{([A-Z0-9_]+):-")
+
+# stem in $CREDENTIALS_DIRECTORY -> the env var deploy/compose.yaml expects,
+# mirroring with-production-env.sh's own `_credential_names`.
+_CREDENTIAL_FILES = {
+    "PLAID_CLIENT_ID": "plaid_client_id",
+    "PLAID_SECRET": "plaid_secret",
+    "PLAID_ACCESS_TOKEN": "plaid_access_token",
+    "PLAID_WEBHOOK_SECRET": "plaid_webhook_secret",
+    "OPENAI_API_KEY": "openai_api_key",
+    "ANTHROPIC_API_KEY": "anthropic_api_key",
+    "FINANCE_MIGRATOR_DB_PASSWORD": "finance_migrator_db_password",
+    "FINANCE_APP_DB_PASSWORD": "finance_app_db_password",
+    "FINANCE_AGENT_DB_PASSWORD": "finance_agent_db_password",
+    "FINANCE_OBSERVER_DB_PASSWORD": "finance_observer_db_password",
+    "FINANCE_BACKUP_DB_PASSWORD": "finance_backup_db_password",
+    "BACKUP_ENCRYPTION_KEY": "backup_encryption_key",
+}
+
+# job -> compose service it maps to 1:1 for credential purposes. `app` is
+# handled separately (its provider key is either/or, not fixed); `health`
+# is deliberately excluded — it runs the `app` service but is a
+# documented, narrower subset of its credential needs (ops/health.py
+# never touches AGENT_DATABASE_URL or a provider key, so those
+# interpolating empty is harmless). `restore-drill` maps to `backup`:
+# restore-verify.sh's own `docker compose` calls all target
+# `--profile backup run --rm backup` (the scratch Postgres it also starts
+# is a *bare* `docker run`, entirely outside Compose, which is the only
+# part of this job with no compose service of its own) — the drift test
+# previously excluded `restore-drill` on the mistaken assumption that none
+# of it went through Compose.
+_JOB_TO_SERVICE = {
+    "postgres": "postgres",
+    "migrate": "migrate",
+    "sync": "sync",
+    "backup": "backup",
+    "restore-drill": "backup",
+    "finops": "finops",
+    "deploy": "deploy",
+}
+
+# Known, documented, accepted gaps between a service's declared `${VAR:-}`
+# references and what its job actually loads — not defects.
+_KNOWN_GAPS: dict[str, set[str]] = {
+    # Milestone 8: the webhook secret isn't minted yet and nothing reads
+    # it in `sync` until the webhook endpoint exists (ADR-016 Revisit-when,
+    # security review finding 9). Must gain real enforcement before
+    # Milestone 8 treats an empty secret as "verification configured".
+    "sync": {"PLAID_WEBHOOK_SECRET"},
+}
 
 
 def _service_blocks(compose_text: str) -> dict[str, str]:
@@ -60,200 +121,491 @@ def _service_blocks(compose_text: str) -> dict[str, str]:
     return {name: "\n".join(body) for name, body in blocks.items()}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-20: the `deploy` service's environment omits every compose-interpolation "
-        "variable, so `finops deploy` cannot run `docker compose` at all."
-    ),
-)
-def test_deploy_service_environment_covers_every_required_compose_variable() -> None:
-    """`finops deploy`/`rollback`/`restart` run *inside* the `deploy`
-    Compose service and shell out to `docker compose -f
-    deploy/compose.yaml ...` from there. Compose interpolates every
-    `${VAR:?...}` in the whole file before running any service — a fact
-    `deploy/compose.yaml`'s own header comment states explicitly — so the
-    `deploy` container's environment must carry all of them.
+def _credential_vars_referenced(block: str) -> set[str]:
+    return {name for name in _CREDENTIAL_VAR_REF_RE.findall(block) if name in _CREDENTIAL_FILES}
 
-    It carries none. Reproduced end to end against real Docker, running
-    exactly what `deploy/scripts/finops.sh` runs::
 
-        docker compose -f deploy/compose.yaml --profile deploy \\
-            run --rm -T deploy finops deploy 1234567
+def _wrapper_exports(job: str, *, agent_provider: str = "openai") -> set[str]:
+    """Run the real `with-production-env.sh` for `job` against a synthetic
+    `$CREDENTIALS_DIRECTORY` holding every known credential, and return
+    the set of credential-shaped env vars it actually exported into the
+    child process — the job's real, executed requirement, not a regex
+    guess at the script's logic."""
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        for env_var, stem in _CREDENTIAL_FILES.items():
+            (Path(tmp_dir) / stem).write_text(f"dummy-{env_var.lower()}")
+        env = {**os.environ, "CREDENTIALS_DIRECTORY": tmp_dir, "AGENT_PROVIDER": agent_provider}
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), job, "--", "env"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        shutil.rmtree(tmp_dir)
+    assert result.returncode == 0, f"wrapper failed for job {job!r}: {result.stderr}"
+    exported = set()
+    for line in result.stdout.splitlines():
+        name, _, _ = line.partition("=")
+        if name in _CREDENTIAL_FILES:
+            exported.add(name)
+    return exported
 
-        deploy failed to start: docker compose -f deploy/compose.yaml pull app
-        failed (exit 1): error while interpolating
-        services.app.environment.AGENT_DATABASE_URL: required variable
-        FINANCE_AGENT_DB_PASSWORD is missing a value
-        ...
-        (exit 1)
 
-    `run_compose`'s `{**os.environ, **env}` merge (QA-1) is correct; the
-    environment it merges into is empty of these values, because
-    `deploy/scripts/with-production-env.sh` exports them into the *host*
-    process that invokes `docker compose run`, and Compose passes only a
-    service's declared `environment:` keys into the container.
-    """
-    compose_text = _COMPOSE_FILE.read_text()
-    required = set(_REQUIRED_VAR_RE.findall(compose_text))
-    assert required, "expected deploy/compose.yaml to declare ${VAR:?required} variables"
+# ---------------------------------------------------------------------------
+# The drift test: with-production-env.sh's job matrix vs. compose.yaml.
+# ---------------------------------------------------------------------------
 
-    deploy_block = _service_blocks(compose_text)["deploy"]
-    declared = set(re.findall(r"^      ([A-Z0-9_]+):", deploy_block, flags=re.MULTILINE))
 
-    missing = sorted(required - declared)
-    assert not missing, (
-        "the `deploy` service cannot interpolate deploy/compose.yaml without "
-        f"{missing}; `finops deploy`/`rollback`/`restart` fail at their first "
-        "`docker compose` call"
+def test_no_compose_service_declares_a_required_interpolation_variable() -> None:
+    """ADR-016 D1: Compose interpolates every `${VAR}` in the whole file
+    before running any one service, so a whole-file `${VAR:?required}`
+    could never express a per-job requirement (QA-20) — enforcement moved
+    to `with-production-env.sh`'s job matrix, tested below.
+
+    Scans only non-comment lines: the file's own header comment uses the
+    literal string `${VAR:?required}` as an illustrative example of the
+    pattern that must no longer appear for real — a naive whole-file
+    regex match against that comment is exactly how the original version
+    of this test (QA-33/security review) stayed green whether or not the
+    real defect was fixed."""
+    non_comment_lines = "\n".join(
+        line for line in _COMPOSE_FILE.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+    required = set(_REQUIRED_VAR_RE.findall(non_comment_lines))
+    assert not required, (
+        f"deploy/compose.yaml still has ${{VAR:?required}} interpolation for {required}; "
+        "ADR-016 D1 requires every credential-shaped variable to use ${VAR:-} instead, "
+        "with requirement enforcement living in with-production-env.sh's job matrix"
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-24: the long-running `app` service runs `finance status`, which exits "
-        "immediately, so `restart: unless-stopped` puts it in a permanent crash loop."
-    ),
-)
-def test_app_service_command_does_not_exit_immediately() -> None:
-    """`deploy/compose.yaml`'s `app` service comments say it is "kept
-    long-running" and stays up "for `docker compose exec`/interactive
-    use". Its `command:` is `["finance", "status"]`, which prints three
-    lines and exits 0. Combined with `restart: unless-stopped`, the
-    container restarts forever. Reproduced against the real image::
+@pytest.mark.parametrize("job,service", sorted(_JOB_TO_SERVICE.items()))
+def test_wrapper_job_covers_every_credential_its_compose_service_references(
+    job: str, service: str
+) -> None:
+    compose_text = _COMPOSE_FILE.read_text()
+    block = _service_blocks(compose_text)[service]
+    referenced = _credential_vars_referenced(block) - _KNOWN_GAPS.get(service, set())
+    exported = _wrapper_exports(job)
+    missing = referenced - exported
+    assert not missing, (
+        f"with-production-env.sh job {job!r} does not export {missing}, which "
+        f"deploy/compose.yaml's {service!r} service references via ${{VAR:-}} — that "
+        "service would start with those credentials silently empty"
+    )
 
-        docker compose -f deploy/compose.yaml up -d app
-        docker compose -f deploy/compose.yaml ps -a
-        deploy-app-1 ... Restarting (0) 3 seconds ago
-        docker inspect deploy-app-1 --format '{{.RestartCount}}'
-        8      # after ~25 seconds
 
-    Every restart opens a database connection and re-runs the status
-    query, forever, on the production VPS.
+def test_app_job_covers_its_credentials_and_only_the_active_provider_key() -> None:
+    """`app`'s provider key is either/or (AGENT_PROVIDER), not a fixed
+    entry in the job matrix — both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
+    appear in compose.yaml's `app` block unconditionally (the inactive
+    one interpolates to an empty string, which is fine — `app` never uses
+    it), so this is checked separately from the generic per-service loop
+    above rather than requiring both providers' keys at once."""
+    compose_text = _COMPOSE_FILE.read_text()
+    block = _service_blocks(compose_text)["app"]
+    referenced = _credential_vars_referenced(block) - {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
 
-    This test asserts the narrow, checkable property: a service with a
-    restart policy must not be given a command that is known to be
-    one-shot. `finance status` (and the other one-shot entrypoints) belong
-    to the profiled `migrate`/`sync`/`backup`/`finops` services, which
-    correctly have no restart policy.
-    """
+    exported_openai = _wrapper_exports("app", agent_provider="openai")
+    assert referenced <= exported_openai
+    assert "OPENAI_API_KEY" in exported_openai
+    assert "ANTHROPIC_API_KEY" not in exported_openai, (
+        "job 'app' must export only the *active* provider's key, never both"
+    )
+
+    exported_anthropic = _wrapper_exports("app", agent_provider="anthropic")
+    assert referenced <= exported_anthropic
+    assert "ANTHROPIC_API_KEY" in exported_anthropic
+    assert "OPENAI_API_KEY" not in exported_anthropic
+
+
+def test_deploy_job_excludes_plaid_backup_and_provider_credentials() -> None:
+    """The `deploy` service is the one with Docker socket access — ADR-016's
+    Context argues that boundary is defense-in-depth, not a containment
+    guarantee, but it's still worth keeping honest: it must never hold the
+    Plaid production access token, the backup encryption key, or a model
+    provider key.
+
+    `FINANCE_AGENT_DB_PASSWORD` is included deliberately, not just for
+    symmetry: `probe_release` runs `docker compose --profile app run --rm
+    app finance selfcheck` *from inside this job's own process*, so
+    Compose interpolates the `app` service block against this same
+    environment — this pins that `deploy` deliberately leaves
+    `FINANCE_AGENT_DB_PASSWORD`/the provider key unresolved there rather
+    than growing this job's set to cover a service it merely invokes.
+    `finance selfcheck` never touches `AGENT_DATABASE_URL` or a provider
+    key (`src/finance_app/ops/selfcheck.py`), so this is safe as long as
+    that stays true."""
+    exported = _wrapper_exports("deploy")
+    forbidden = {
+        "PLAID_CLIENT_ID",
+        "PLAID_SECRET",
+        "PLAID_ACCESS_TOKEN",
+        "PLAID_WEBHOOK_SECRET",
+        "BACKUP_ENCRYPTION_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "FINANCE_AGENT_DB_PASSWORD",
+    }
+    leaked = exported & forbidden
+    assert not leaked, f"job 'deploy' exported {leaked}, which it must never hold"
+
+
+# ---------------------------------------------------------------------------
+# with-production-env.sh behavior (QA round 3).
+# ---------------------------------------------------------------------------
+
+
+def test_wrapper_leaves_no_credential_file_behind_after_a_successful_run() -> None:
+    """Round 3: the previous implementation staged credentials in a
+    `mktemp` file and relied on an `EXIT` trap to remove it — but `exec
+    "$@"` at the end replaces the process image, so the trap never ran,
+    and the plaintext file survived on disk indefinitely (worse for
+    `finance-app.service`'s `RemainAfterExit=yes`)."""
+    tmp_dir = tempfile.mkdtemp()
+    scratch_tmpdir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("apppw")
+        before = set(os.listdir(scratch_tmpdir))
+        env = {**os.environ, "CREDENTIALS_DIRECTORY": tmp_dir, "TMPDIR": scratch_tmpdir}
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "health", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        after = set(os.listdir(scratch_tmpdir))
+        assert after == before, f"wrapper left files behind in $TMPDIR: {after - before}"
+    finally:
+        shutil.rmtree(tmp_dir)
+        shutil.rmtree(scratch_tmpdir)
+
+
+def test_wrapper_rejects_a_credential_containing_an_embedded_newline() -> None:
+    """A multi-line credential must never be silently truncated (the
+    previous temp-file round-trip re-parsed credential *content* as
+    `NAME=VALUE` shell assignments, so a newline in `BACKUP_ENCRYPTION_KEY`
+    both truncated the real value and could inject an arbitrary variable
+    into the job's environment) — reject it outright instead."""
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("apppw")
+        (Path(tmp_dir) / "finance_backup_db_password").write_text("bkpw")
+        (Path(tmp_dir) / "backup_encryption_key").write_text(
+            "line1\nBACKUP_ENCRYPTION_KEY=attacker-supplied"
+        )
+        env = {**os.environ, "CREDENTIALS_DIRECTORY": tmp_dir}
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "backup", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode != 0
+        assert "attacker-supplied" not in result.stdout
+        assert "embedded newline" in result.stderr
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_wrapper_rejects_a_credential_containing_a_carriage_return() -> None:
+    """CRLF line endings (a Windows-side credential source, an editor, a
+    paste path) aren't caught by the embedded-newline check — `wc -l`
+    still sees one line — but silently corrupt the value just the same:
+    a `BACKUP_ENCRYPTION_KEY` ending in `\\r` would encrypt backups under
+    a passphrase that differs from whatever was recorded out-of-band,
+    discovered only at restore time."""
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("app\rpw")
+        env = {**os.environ, "CREDENTIALS_DIRECTORY": tmp_dir}
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "health", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode != 0
+        assert "carriage return" in result.stderr
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_wrapper_rejects_a_whitespace_only_credential() -> None:
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("apppw")
+        (Path(tmp_dir) / "finance_backup_db_password").write_text("bkpw")
+        (Path(tmp_dir) / "backup_encryption_key").write_text("   ")
+        env = {**os.environ, "CREDENTIALS_DIRECTORY": tmp_dir}
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "backup", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode != 0
+        assert "BACKUP_ENCRYPTION_KEY" in result.stderr
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_wrapper_does_not_trust_an_ambient_value_for_a_missing_credential() -> None:
+    """A required credential must come from `$CREDENTIALS_DIRECTORY`, never
+    from whatever this process happened to inherit (an `EnvironmentFile=`,
+    a stray export in an interactive shell) — the file being absent must
+    fail exactly as hard as it failing to decrypt would."""
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("apppw")
+        # finance_backup_db_password and backup_encryption_key deliberately
+        # absent from $CREDENTIALS_DIRECTORY.
+        env = {
+            **os.environ,
+            "CREDENTIALS_DIRECTORY": tmp_dir,
+            "FINANCE_BACKUP_DB_PASSWORD": "ambient-value-must-not-be-trusted",
+            "BACKUP_ENCRYPTION_KEY": "ambient-value-must-not-be-trusted",
+        }
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "backup", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode != 0, (
+            "wrapper accepted a credential from the ambient environment instead of "
+            "requiring it to come from $CREDENTIALS_DIRECTORY"
+        )
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_wrapper_does_not_leak_a_non_required_credential_into_the_job() -> None:
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        (Path(tmp_dir) / "finance_app_db_password").write_text("apppw")
+        (Path(tmp_dir) / "finance_backup_db_password").write_text("bkpw")
+        (Path(tmp_dir) / "backup_encryption_key").write_text("key")
+        env = {
+            **os.environ,
+            "CREDENTIALS_DIRECTORY": tmp_dir,
+            "PLAID_SECRET": "ambient-plaid-secret",
+        }
+        result = subprocess.run(
+            ["/bin/sh", str(_WRAPPER), "backup", "--", "/bin/sh", "-c", "echo [$PLAID_SECRET]"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "[]", (
+            f"job 'backup' must never see PLAID_SECRET, even one already in this "
+            f"process's own environment; got {result.stdout!r}"
+        )
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_wrapper_rejects_an_unknown_job() -> None:
+    result = subprocess.run(
+        ["/bin/sh", str(_WRAPPER), "not-a-real-job", "--", "/bin/true"],
+        env={**os.environ, "CREDENTIALS_DIRECTORY": tempfile.mkdtemp()},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "unknown job" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# D2 — app has no restart policy and no baked-in command.
+# ---------------------------------------------------------------------------
+
+
+def test_app_service_has_no_restart_policy_or_command() -> None:
+    """ADR-016 D2: a container kept alive with a placeholder one-shot
+    command (the prior `["finance", "status"]` + `restart: unless-stopped`)
+    crash-loops forever the instant that command exits (QA-24). `app` must
+    have neither a `restart:` policy nor a baked-in `command:` — it runs
+    only as `docker compose --profile app run --rm app <cmd>`."""
     compose_text = _COMPOSE_FILE.read_text()
     app_block = _service_blocks(compose_text)["app"]
-
-    assert "restart: unless-stopped" in app_block, "fixture assumption: app has a restart policy"
-
-    command_match = re.search(r"^    command: (.+)$", app_block, flags=re.MULTILINE)
-    assert command_match is not None, "app service declares no command"
-    command = command_match.group(1)
-
-    one_shot = ("finance status", "finance --help", "finance version", "alembic upgrade head")
-    offending = [candidate for candidate in one_shot if candidate.replace(" ", '", "') in command]
-    assert not offending, (
-        f"`app` has restart: unless-stopped but runs the one-shot command {command}; "
-        "the container exits immediately and Docker restarts it forever"
+    assert not re.search(r"^    restart:", app_block, flags=re.MULTILINE), (
+        "app has a restart: policy — combined with no persistent process to keep "
+        "alive (D2), this crash-loops"
+    )
+    assert not re.search(r"^    command:", app_block, flags=re.MULTILINE), (
+        "app has a baked-in command: — it must be started only via "
+        "`docker compose --profile app run --rm app <cmd>`"
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-25: PrivateTmp=true breaks restore-verify.sh's mktemp password file, which "
-        "is bind-mounted into a container by the *host* Docker daemon."
-    ),
-)
-def test_restore_drill_unit_does_not_combine_private_tmp_with_a_host_bind_mount() -> None:
-    """`deploy/systemd/finance-restore-drill.service` (added in 50fee57)
-    sets `PrivateTmp=true` and asserts in a comment that this "is
-    compatible with restore-verify.sh's `mktemp` scratch-password file".
-    It is not.
+# ---------------------------------------------------------------------------
+# D7 — restore-drill staging directory.
+# ---------------------------------------------------------------------------
 
-    `PrivateTmp=true` gives the unit's processes a private `/tmp` in their
-    own mount namespace. `restore-verify.sh` does::
 
-        SCRATCH_PASSWORD_FILE="$(mktemp)"                     # /tmp/tmp.XXXX, namespaced
-        docker run -d ... -v "$SCRATCH_PASSWORD_FILE:/run/secrets/scratch_password:ro" ...
-
-    The bind-mount source is resolved by the Docker **daemon**, which runs
-    outside that namespace. `/tmp/tmp.XXXX` does not exist on the host
-    root, so Docker creates an empty *directory* there and mounts it.
-    `POSTGRES_PASSWORD_FILE=/run/secrets/scratch_password` then points at a
-    directory, the scratch Postgres never starts, and the script exits via
-    its own "scratch instance never became ready" path.
-
-    Consequence: the weekly restore drill fails every week, no
-    `restore_verification` row is ever written, `finops backup-status`
-    reports `unverified` forever, and `aggregate_health` therefore reports
-    the whole system unhealthy — the exact "a backup that has never been
-    restored is not verified" signal ADR-015 exists to protect, disabled
-    by a hardening change.
-
-    Either drop `PrivateTmp=true` from this unit, or stage the password
-    file somewhere outside `/tmp` (e.g. `RuntimeDirectory=`) that the
-    daemon can also see.
-    """
+def test_restore_drill_unit_declares_a_runtime_directory() -> None:
+    """ADR-016 D7: `restore-verify.sh`'s scratch password must be staged
+    somewhere the host Docker daemon can resolve as a bind-mount source —
+    `RuntimeDirectory=` (`/run/<name>`, host mount namespace), never a
+    `PrivateTmp=true` unit's private `/tmp` (QA-25: the daemon runs outside
+    that namespace and silently substitutes an empty directory)."""
     unit = _RESTORE_DRILL_UNIT.read_text()
+    assert re.search(r"^RuntimeDirectory=\S+", unit, flags=re.MULTILINE), (
+        "finance-restore-drill.service does not declare RuntimeDirectory="
+    )
+    assert re.search(r"^RuntimeDirectoryMode=0700", unit, flags=re.MULTILINE), (
+        "finance-restore-drill.service's RuntimeDirectory= must be 0700 — it stages "
+        "a plaintext scratch password"
+    )
+
+
+def test_restore_verify_refuses_to_fall_back_to_tmp_under_systemd() -> None:
+    """If `$CREDENTIALS_DIRECTORY` is set (i.e. running under the systemd
+    unit) but `$RUNTIME_DIRECTORY` is not, the script must refuse rather
+    than silently falling back to a bare `mktemp -d` under `/tmp` — that
+    fallback is exactly what reproduced QA-25 under `PrivateTmp=true`.
+
+    Actually executes the script up to that check (it runs before any
+    Docker/network access, so no daemon is needed) rather than only
+    grepping for the guard's source text — a grep-only version of this
+    test would stay green even if the `if` condition itself were wrong or
+    silently short-circuited."""
+    result = subprocess.run(
+        ["/bin/sh", str(_RESTORE_VERIFY_SCRIPT)],
+        env={**os.environ, "CREDENTIALS_DIRECTORY": "/does/not/matter"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 1
+    assert "Refusing to fall back to /tmp" in result.stderr
+
+    assert not re.search(r'-v\s+"\$SCRATCH_PASSWORD_FILE:', _RESTORE_VERIFY_SCRIPT.read_text()), (
+        "restore-verify.sh bind-mounts a single mktemp *file* again — D7 requires "
+        "bind-mounting the *directory* the Docker daemon can actually resolve"
+    )
+
+
+def test_restore_verify_removes_the_scratch_password_only_after_readiness() -> None:
+    """Round 3: the scratch password file used to be removed immediately
+    after `docker run -d`, before the scratch Postgres was confirmed
+    ready. Since D7 bind-mounts the *directory* (not the file), that
+    deletion is visible inside the container the instant it happens —
+    racing the container's own startup and reproducing the same "scratch
+    instance never became ready" failure D7 was meant to fix. The removal
+    must come after the `pg_isready` loop, not before `docker run`."""
     script = _RESTORE_VERIFY_SCRIPT.read_text()
-
-    mounts_a_mktemp_path = bool(
-        re.search(r"mktemp", script) and re.search(r'-v\s+"\$SCRATCH_PASSWORD_FILE:', script)
-    )
-    assert mounts_a_mktemp_path, "fixture assumption: restore-verify.sh bind-mounts a mktemp file"
-
-    assert "PrivateTmp=true" not in unit, (
-        "finance-restore-drill.service sets PrivateTmp=true while restore-verify.sh "
-        "bind-mounts a /tmp path into a container via the host Docker daemon; the "
-        "daemon cannot see the unit's private /tmp and silently substitutes an empty "
-        "directory, so the scratch Postgres never starts"
+    run_match = re.search(r"docker run -d.*?\n(?:.*\\\n)*.*\n", script)
+    ready_match = re.search(r"until docker exec .* pg_isready", script)
+    rm_match = re.search(r'rm -f "\$SCRATCH_PASSWORD_FILE"', script)
+    assert run_match and ready_match and rm_match, "expected script structure not found"
+    assert rm_match.start() > ready_match.start() > run_match.start(), (
+        "the scratch password file must be removed only after the readiness loop, "
+        "not immediately after `docker run -d`"
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "QA-26: probe_application's `docker compose exec -T app true` reports healthy "
-        "for a container that is in a restart loop, if it happens to land in an up window."
-    ),
+# ---------------------------------------------------------------------------
+# D3 — probe_release replaces the exec-based, timing-dependent probe.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_release_reports_healthy_when_the_right_release_selfchecks_clean() -> None:
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
+    )
+
+    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess([], 0, payload + "\n", "")
+
+    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
+    assert result["status"] == "healthy"
+    assert result["reported_release_id"] == "abc1234"
+
+
+_HEALTHY_ABC1234 = json.dumps(
+    {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
 )
-def test_probe_application_detects_a_crash_looping_container() -> None:
-    """QA-8's fix replaced a hardcoded `"healthy"` literal with a real
-    probe, but the probe is `docker compose exec -T app true` — which only
-    proves that a container existed and `/bin/true` ran at that instant.
-    A container Docker is restarting on a loop is up for part of every
-    cycle, so the probe's verdict is a coin flip decided by timing.
 
-    Measured against the real image and the real `deploy/compose.yaml`
-    `app` service (which crash-loops — see
-    `test_app_service_command_does_not_exit_immediately`):
 
-        immediately after `up -d app`  -> healthy, healthy, healthy  (3/3)
-        after backoff had grown        -> unreachable (10/10)
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        _HEALTHY_ABC1234 + "\n",
+        "Creating network...\n" + _HEALTHY_ABC1234,
+        _HEALTHY_ABC1234 + "\nContainer app-run-1  Removed\n",
+        _HEALTHY_ABC1234 + '\n{"level": "info", "msg": "done"}\n',
+    ],
+    ids=["clean", "leading-chatter", "trailing-chatter", "trailing-unrelated-json"],
+)
+def test_probe_release_finds_the_payload_around_surrounding_noise(stdout: str) -> None:
+    """`_parse_selfcheck_stdout` must not stop at the first line (scanning
+    from the end) that fails to parse or isn't the selfcheck payload — a
+    version that does would misreport a genuinely healthy release as
+    `unreachable` (from Compose startup/teardown chatter) or `wrong_image`
+    (from an unrelated JSON object elsewhere in the stream), which
+    `deploy_health_check` would then auto-rollback (ADR-008) — exactly
+    the QA-2 failure class the surrounding code exists to prevent."""
 
-    `finops deploy` probes immediately after `up -d`, i.e. exactly in the
-    window where the answer is wrong, so it promotes a crash-looping
-    release to `current` and reports a green deploy.
+    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess([], 0, stdout, "")
 
-    The probe must consult container *state* (`docker compose ps` /
-    `docker inspect` restart count or a Compose `healthcheck:`), not just
-    win one exec race. This test supplies a runner that models exactly
-    that container: `exec` succeeds, `ps` says `Restarting`.
-    """
-    from finance_app.ops.status import probe_application
+    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
+    assert result["status"] == "healthy", result
+    assert result["reported_release_id"] == "abc1234"
 
-    class _Completed:
-        def __init__(self, stdout: str) -> None:
-            self.stdout = stdout
-            self.stderr = ""
-            self.returncode = 0
 
-    def crash_looping_runner(compose_file, *args, env=None, runner=None):  # noqa: ANN001, ANN002, ARG001
-        if "ps" in args:
-            return _Completed('[{"Name":"deploy-app-1","State":"restarting","ExitCode":0}]')
-        # `exec` lands inside one of the container's brief up windows.
-        return _Completed("")
-
-    verdict = probe_application("deploy/compose.yaml", run_compose_fn=crash_looping_runner)
-
-    assert verdict == "unreachable", (
-        "a container Docker is actively restarting must not be reported as healthy"
+def test_probe_release_detects_a_wrong_image() -> None:
+    """QA-26's underlying concern — a probe that could report healthy for
+    the wrong release — is structurally eliminated by D3: `probe_release`
+    runs the exact image under deployment and checks what it reports about
+    itself, so a stale/wrong image is caught by content, not by luck."""
+    # `release_id` (the RELEASE_ID env var probe_release injected) reads
+    # back as the requested id, same as ever — it's `image_release_id`
+    # (the build-time identity baked into the image actually running,
+    # QA-37) that disagrees, which is what `wrong_image` must catch.
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "stale999", "overall": "healthy"}
     )
+
+    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess([], 0, payload + "\n", "")
+
+    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
+    assert result["status"] == "wrong_image"
+    assert result["reported_release_id"] == "stale999"
+
+
+def test_probe_release_reports_unhealthy_on_a_nonzero_selfcheck_exit() -> None:
+    payload = json.dumps(
+        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "unhealthy"}
+    )
+
+    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise ComposeError("docker compose run ... failed (exit 1): ...", stdout=payload + "\n")
+
+    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
+    assert result["status"] == "unhealthy"
+    assert result["reported_release_id"] == "abc1234"
+
+
+def test_probe_release_reports_unreachable_when_docker_itself_fails() -> None:
+    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise ComposeError("docker CLI not found")
+
+    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
+    assert result["status"] == "unreachable"
+    assert result["reported_release_id"] is None

@@ -1,5 +1,5 @@
 [Unit]
-Description=finance-app production stack (docker compose)
+Description=finance-app production stack (docker compose) — postgres only until Milestone 8 (ADR-016 D2)
 Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/deployment.md
 After=docker.service network-online.target
 Requires=docker.service
@@ -32,27 +32,30 @@ RestrictSUIDSGID=true
 # `systemd-creds encrypt` per docs/runbooks/deploy.md, never as plaintext
 # files or environment variables on disk. Decrypted only into this unit's
 # private $CREDENTIALS_DIRECTORY for the lifetime of the service.
-LoadCredentialEncrypted=plaid_client_id:/etc/finance-app/credentials/plaid_client_id.cred
-LoadCredentialEncrypted=plaid_secret:/etc/finance-app/credentials/plaid_secret.cred
-LoadCredentialEncrypted=plaid_access_token:/etc/finance-app/credentials/plaid_access_token.cred
-LoadCredentialEncrypted=plaid_webhook_secret:/etc/finance-app/credentials/plaid_webhook_secret.cred
-LoadCredentialEncrypted=openai_api_key:/etc/finance-app/credentials/openai_api_key.cred
-LoadCredentialEncrypted=anthropic_api_key:/etc/finance-app/credentials/anthropic_api_key.cred
+#
+# ADR-016 D1: trimmed to exactly the `postgres` job's set — this unit's
+# plain `docker compose up -d`/`down` (no `--profile`) brings up only the
+# un-profiled `postgres` service (D2 — `app` is no longer long-running),
+# which needs only its own bootstrap password. It no longer decrypts the
+# Plaid production access token, any model provider key, or any
+# credential besides the one Postgres role password.
 LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
-LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
-LoadCredentialEncrypted=finance_agent_db_password:/etc/finance-app/credentials/finance_agent_db_password.cred
-LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred
-LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
-LoadCredentialEncrypted=backup_encryption_key:/etc/finance-app/credentials/backup_encryption_key.cred
 
 # Non-secret, per-host configuration (RELEASE_ID, CONTAINER_IMAGE_REPO,
 # AGENT_PROVIDER, ...) — safe to keep as a plain file since it holds no
-# credential material; updated by `finops deploy`/by hand, never by CI.
+# credential material; updated by `deploy/scripts/finops.sh` after every
+# deploy/rollback (ADR-016 D8) or by hand, never by CI.
 EnvironmentFile=-/etc/finance-app/env
 
-ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml up -d
-ExecStop=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml down
-ExecReload=/opt/finance-app/deploy/scripts/with-production-env.sh docker compose -f /opt/finance-app/deploy/compose.yaml restart app
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh postgres -- docker compose -f /opt/finance-app/deploy/compose.yaml up -d
+ExecStop=/opt/finance-app/deploy/scripts/with-production-env.sh postgres -- docker compose -f /opt/finance-app/deploy/compose.yaml down
+# ADR-016 D2: "restart app" no longer means anything — there is no
+# long-running `app` container to restart. Reload now means "converge
+# the running stack to whatever RELEASE_ID/env is currently configured",
+# the same operation `finops restart` performs from the `deploy`
+# Compose service (docs/deployment.md) — a plain `up -d` is idempotent
+# when nothing changed.
+ExecReload=/opt/finance-app/deploy/scripts/with-production-env.sh postgres -- docker compose -f /opt/finance-app/deploy/compose.yaml up -d
 
 TimeoutStartSec=120
 TimeoutStopSec=60

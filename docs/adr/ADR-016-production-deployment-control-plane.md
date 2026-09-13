@@ -2,6 +2,21 @@
 
 **Status:** Accepted
 
+## Implementation status
+
+The decision below (D1–D8) was accepted in full; what has actually shipped is narrower. A commit message and this branch's PR title both asserted D8 was done when it wasn't — trust this table over either, and update it in the same PR as whatever changes the underlying status (verified 2026-09-12, round-3 security/QA review):
+
+| Decision | Status |
+|---|---|
+| D1 — Compose stops enforcing credential requirements; the job wrapper does | Shipped |
+| D2 — no long-running `app` service | Shipped |
+| D3 — post-deploy probe runs the image being deployed | Shipped. Round-3's follow-up defects are closed: `probe_release`'s `wrong_image` check now compares a build-time image identity (`Settings.image_release_id`, baked by `Dockerfile`'s `ARG RELEASE_ID` → `ENV IMAGE_RELEASE_ID`, wired from CI's `RELEASE_ID=${{ github.sha }}` build-arg) instead of the `RELEASE_ID` environment variable it injects itself, and `_do_rollback`/`restart` now pass `run_compose_fn=run_compose` into `probe_release` so the injectable compose runner is actually consulted. One migration caveat: any release built before this landed has no baked identity (`image_release_id` reads `null`), which `probe_release` treats as `wrong_image` — `finops rollback`/`restart` against such a release refuses with "manual intervention required" until a post-change image is deployed over it. See docs/deployment.md. |
+| D4 — migration head is a property of the installed package, not the CWD | **Not shipped.** `finance_app.db.migrate` and the `migrations/` → `src/finance_app/migrations/` move do not exist; `deploy/compose.yaml`'s `migrate` service deliberately still runs `alembic upgrade head` against the repo-root `alembic.ini` — see that service's own comment, and do not point it at `finance_app.db.migrate` until this ships |
+| D5 — one lock for the whole deploy | **Not shipped** (`tests/integration/test_deploy_gate_regression.py`, `xfail(strict=True)`, QA-21) |
+| D6 — migration 0005 deduplicates before it constrains | **Not shipped** (same file, QA-23) |
+| D7 — throwaway secrets for host-launched containers live in `RuntimeDirectory` | Shipped |
+| D8 — the recorded release is persisted where the timers read it | **Not shipped.** No `finops current-release` command, nothing writes `/etc/finance-app/env`, no `ReadWritePaths=/etc/finance-app` on any unit — see `docs/deployment.md`'s "Deliberately deferred" section |
+
 Refines ADR-007, ADR-008, ADR-011 and ADR-015. Supersedes none of them: every invariant those ADRs assert still holds, and two of them (ADR-008's "rollback is one step", ADR-011's "no in-application scheduler") are strengthened here. This ADR resolves a set of Milestone 7 defects that two independent review rounds (security-reviewer, qa-adversarial) each traced to one structural collision rather than to individual bugs.
 
 ## Context
@@ -127,6 +142,8 @@ def selfcheck(json_output: bool = typer.Option(False, "--json")) -> None:  # exi
 ```
 
 `probe_release` fails the deploy if the container exits non-zero, if the JSON is unparseable, if `overall != "healthy"`, **or if `reported_release_id != release_id`** — the last catching a wrong/stale image, which no `exec`-based probe could ever detect.
+
+**Round-3 correction (implemented):** as first shipped, `reported_release_id` was `settings.release_id` — read from the `RELEASE_ID` environment variable, the same one `probe_release` itself sets on the `docker compose run` it's checking the output of. That comparison could never disagree: it is not a check on the image at all, only on whether the environment variable round-tripped. The fix adds a second field, `image_release_id`, populated from `Settings.image_release_id`, which reads `IMAGE_RELEASE_ID` — an `ENV` baked into the image at build time from a Dockerfile `ARG RELEASE_ID`, wired from CI's `docker/build-push-action@v6` step (`build-args: RELEASE_ID=${{ github.sha }}` in `publish-image`, only on a push to `main`, so the value is never contributor-influenceable). `deploy/compose.yaml`'s `app` service does not list `IMAGE_RELEASE_ID` in its `environment:`, so `docker compose run` cannot override the baked value the way it can (and does, deliberately) for `RELEASE_ID`. `probe_release`'s `wrong_image` check now compares `image_release_id` against the requested `release_id` — a value that genuinely originates in the image, not in what the prober supplied it.
 
 `deploy_health_check` becomes:
 

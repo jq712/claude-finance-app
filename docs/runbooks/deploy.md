@@ -54,29 +54,36 @@ credentials inside a systemd unit that declares `LoadCredentialEncrypted=`
 (that's what `$CREDENTIALS_DIRECTORY` requires) — a bare interactive SSH
 shell has no route to that TPM/machine-key-bound decryption. Every command
 below that pipes through `with-production-env.sh` therefore runs via
-`systemd-run`, which creates a transient unit with the same credential set
-as `finance-app.service` for the duration of one command:
+`systemd-run`, which creates a transient unit with its own credential set
+(the `deploy` job's — see below, **not** `finance-app.service`'s) for the
+duration of one command:
 
 ```
 finops_run() {
     sudo systemd-run --pty --wait --collect --same-dir \
-        $(sed -n 's/^LoadCredentialEncrypted=/--property=LoadCredentialEncrypted=/p' \
-            /etc/systemd/system/finance-app.service) \
-        -- /opt/finance-app/deploy/scripts/with-production-env.sh \
+        --property=LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred \
+        --property=LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred \
+        --property=LoadCredentialEncrypted=finance_observer_db_password:/etc/finance-app/credentials/finance_observer_db_password.cred \
+        -- /opt/finance-app/deploy/scripts/with-production-env.sh deploy -- \
            /opt/finance-app/deploy/scripts/finops.sh "$@"
 }
 ```
 
 Paste that function into your shell once per SSH session; the rest of this
 runbook calls it as `finops_run deploy <sha>` / `finops_run rollback` /
-`finops_run restart`. The `sed` line derives the `--property=LoadCredentialEncrypted=...` flags
-directly from `finance-app.service` so this can't drift out of sync with
-the unit file's actual credential list. If `with-production-env.sh` is run
-any other way, it now fails loudly with this same command rather than
-silently proceeding with an empty credential set (a real defect found in
-review: `deploy/compose.yaml`'s `${VAR:?required}` interpolation used to
-fail with a confusing "variable is required" error instead of the real
-problem).
+`finops_run restart`. The three `--property=LoadCredentialEncrypted=...`
+flags are ADR-016 D1's `deploy` job's credential set — deliberately **not**
+derived from `finance-app.service`, which under D1 holds only
+`finance_migrator_db_password` (job `postgres` — that unit's bare `docker
+compose up -d`/`down` brings up only the un-profiled `postgres` service,
+which needs nothing else) and so can no longer stand in for `deploy`'s
+three-credential set. Unlike `with-production-env.sh`'s
+own job matrix — which `tests/unit/test_deploy_topology_regression.py`'s
+drift test keeps mechanically in sync with `deploy/compose.yaml` — this
+list is plain prose and must be updated by hand if that matrix's `deploy`
+entry ever changes. If `with-production-env.sh` is run any other way, or
+without a job argument, it fails loudly rather than silently proceeding
+with an empty or wrong credential set.
 
 ## 3. First deploy
 
@@ -91,7 +98,7 @@ problem).
    cd /opt/finance-app
    finops_run deploy <sha>
    ```
-   `finops deploy` runs inside the narrowly-scoped `deploy` Compose service (Docker socket mounted — see that service's comment in `compose.yaml` for why it's split from the long-running `app` service). It pulls the image, brings the stack up under that tag, runs the health check, and either promotes the release to `current` or automatically rolls back — see `docs/deployment.md`.
+   `finops deploy` runs inside the narrowly-scoped `deploy` Compose service (Docker socket mounted — see that service's comment in `compose.yaml` for why it's split from `app`, which is itself one-shot and profile-gated, not long-running, until Milestone 8 — ADR-016 D2). It pulls the image, runs the migration preflight, health-checks the release via a one-shot `finance selfcheck` probe against that exact image (no persistent bring-up), and either promotes the release to `current` or automatically rolls back — see `docs/deployment.md`.
 4. Verify:
    ```
    docker compose -f deploy/compose.yaml --profile finops run --rm finops finops health
@@ -108,7 +115,7 @@ cd /opt/finance-app
 finops_run deploy <sha>
 ```
 
-That's the entire procedure — no compose file edits, no manual image pulls, no restart choreography. `finops deploy` handles pull, bring-up, health verification, and (on failure) automatic rollback.
+That's the entire procedure — no compose file edits, no manual image pulls, no restart choreography. `finops deploy` handles the pull, migration preflight, health verification (a one-shot selfcheck probe against the deployed image — nothing is brought up persistently), and, on failure, automatic rollback.
 
 ## 5. Rollback
 
@@ -124,7 +131,7 @@ Rolls back to the tracked previous known-good release — no rebuild, no registr
 finops_run restart
 ```
 
-Restarts only the `app` container — does not touch Postgres, does not change `ops.releases`. Use this when the app process itself needs to come back (e.g. after a transient resource issue), not as a substitute for a release.
+ADR-016 D2: `app` is a one-shot `docker compose --profile app run --rm` command until Milestone 8's webhook server, not a long-running process — there is nothing to restart in the traditional sense. `finops restart` reads the currently-recorded release id (`finance_observer`, read-only) and re-runs `finance selfcheck` against it, reporting whether it's still healthy; it never writes to `ops.releases`. Use it to re-confirm the deployed release is healthy without deploying anything new — once Milestone 8 lands, this regains a real process to restart.
 
 ## 7. Credential rotation
 
