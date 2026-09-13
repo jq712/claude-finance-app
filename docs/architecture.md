@@ -107,7 +107,7 @@ This is why there is no in-place category column on the raw table, and why the `
 
 ## Deployment
 
-Git is the source of truth. Code reaches production only as an immutable image tagged by Git SHA, via CI → staging → smoke tests → critical evals → production → post-deploy health checks → automatic rollback on defined failure. Current and previous known-good releases are always tracked. There is no editing on the VPS and no self-hosted runner on it.
+Git is the source of truth. Code reaches production only as an immutable image tagged by Git SHA, via CI → staging → smoke tests → critical evals → production → post-deploy health checks → automatic rollback on defined failure. Current and previous known-good releases are always tracked. There is no editing the production directory directly, and no self-hosted CI runner on the VPS. The engineering workspace and the production deployment share that VPS (ADR-007/ADR-010, revised 2026-09-13) — see `docs/security-model.md`'s "Trust boundaries" for what separates them now that it isn't a separate host.
 
 ## Deliberate omissions
 

@@ -15,7 +15,7 @@ Format: **Context** (what forced the decision) Â· **Decision** (what we chose) Â
 | [007](ADR-007-git-cicd-only-production-path.md) | Git and CI/CD are the only normal path to production |
 | [008](ADR-008-immutable-releases-rollback.md) | Immutable container releases and rollback |
 | [009](ADR-009-isolated-dev-plaid-sandbox.md) | Isolated development environment with Plaid Sandbox |
-| [010](ADR-010-production-secrets-excluded-from-engineering.md) | Production secrets excluded from the engineering environment |
+| [010](ADR-010-production-secrets-excluded-from-engineering.md) | Production secrets excluded from the engineering session |
 | [011](ADR-011-systemd-timers-scheduling.md) | systemd timers for scheduled single-host jobs |
 | [012](ADR-012-daily-sync-reconciliation-fallback.md) | Daily sync remains the reconciliation fallback |
 | [013](ADR-013-claude-code-engineering-openai-runtime.md) | Claude Code for engineering, OpenAI for the runtime agent (runtime-provider portion superseded by ADR-014) |

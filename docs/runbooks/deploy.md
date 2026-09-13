@@ -1,18 +1,21 @@
 # Runbook: provisioning the VPS, first deploy, normal release, rollback, credential rotation
 
-Owner-performed. The Claude Code engineering environment never performs any step in this document beyond the earlier `git push`/CI stages — it has no VPS credentials, no SSH access, and per ADR-010 must never be given any. Everything below happens on the VPS itself, over the owner's own SSH session. See `docs/deployment.md` for the release-sequence design this runbook implements and `docs/security-model.md` for why the boundary is drawn here.
+Owner-performed. **As of 2026-09-13, the engineering workspace and the production deployment share one VPS** (owner's deliberate choice — see ADR-007/ADR-010's revision notes and `docs/security-model.md`'s "Trust boundaries"). The Claude Code engineering session never performs any step in this document beyond the earlier `git push`/CI stages: it has no production credentials, cannot read `/opt/finance-app` or `/etc/finance-app/**`, and has no `sudo` — not because it lacks a network path (it's on the same box), but because the production directory and credentials are owned by a separate, more-privileged Unix user it is not a member of, and `.claude/settings.json` additionally denies it the `systemd-creds`/`ssh`/`scp`/`rsync` commands as policy. Everything below happens as the owner, either at the console or over SSH into that same VPS. See `docs/deployment.md` for the release-sequence design this runbook implements.
 
 ## 1. Provision the VPS (one time)
 
-1. Provision a Linux VPS (any provider; systemd + Docker is the only requirement — `docs/architecture.md`'s "deliberate omissions" apply here too, no managed Kubernetes).
+1. Provision a Linux VPS (any provider; systemd + Docker is the only requirement — `docs/architecture.md`'s "deliberate omissions" apply here too, no managed Kubernetes). If the engineering workspace already lives on this host, this step is done.
 2. Install Docker Engine + the Compose plugin (`docker compose version` should report v2).
 3. Confirm `systemd-creds` is available (`systemd-creds --version`; systemd ≥ 250 — check the distribution's systemd version before provisioning if unsure).
-4. Create the deploy directory and restrict it:
+4. **Create the production Unix user/group and lock down the deploy directory** — this is the boundary everything else in this section and in `docs/security-model.md` depends on; skipping it means engineering and production share not just a host but a Unix account:
    ```
+   sudo useradd --system --create-home --home-dir /opt/finance-app --shell /usr/sbin/nologin finance-prod
    sudo mkdir -p /opt/finance-app /etc/finance-app/credentials
+   sudo chown -R finance-prod:finance-prod /opt/finance-app /etc/finance-app
    sudo chmod 700 /etc/finance-app/credentials
    ```
-5. Copy `deploy/` (this repository's `deploy/compose.yaml`, `deploy/caddy/`, `deploy/scripts/`) to `/opt/finance-app/deploy/` and the unit files in `deploy/systemd/*.service`/`*.timer` to `/etc/systemd/system/`. This is a deliberate, owner-performed sync — not something CI pushes automatically (ADR-007: no self-hosted runner, no arbitrary PR code execution on the VPS). Re-run this step only when `deploy/` itself changes, which should be rare; ordinary application releases never touch these files, only the image tag (`RELEASE_ID`).
+   Confirm the engineering session's own Unix user (whatever user Claude Code sessions run as) is **not** a member of `finance-prod`'s group and cannot read either path — `sudo -u <engineering-user> ls /opt/finance-app` should fail with permission denied. Confirm that user also has no `sudo` entry (`sudo -l -U <engineering-user>` as root, or attempt `sudo -n true` as that user — it should fail) and is not a member of `systemd-journal` (`groups <engineering-user>` — needed so `journalctl -u finance-*` stays owner-only; see `docs/incident-response.md`). All three checks are worth re-running periodically; permission drift here is a silent, total loss of the confidentiality boundary this whole setup relies on.
+5. Copy `deploy/` (this repository's `deploy/compose.yaml`, `deploy/caddy/`, `deploy/scripts/`) to `/opt/finance-app/deploy/` and the unit files in `deploy/systemd/*.service`/`*.timer` to `/etc/systemd/system/`, then `chown -R finance-prod:finance-prod /opt/finance-app`. This is a deliberate, owner-performed sync — not something CI pushes automatically, and not something the engineering session's user can do once step 4's permissions are in place (ADR-007: no arbitrary PR code execution against the production directory). Re-run this step only when `deploy/` itself changes, which should be rare; ordinary application releases never touch these files, only the image tag (`RELEASE_ID`).
 6. `sudo systemctl daemon-reload`
 
 ## 2. Mint the production credentials (one time, then per rotation)

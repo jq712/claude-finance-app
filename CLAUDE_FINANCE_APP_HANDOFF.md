@@ -182,6 +182,8 @@ Prefer Linux-native encrypted credential handling suitable for a single VPS, suc
 
 ### 4.5 Claude Code does not receive production Plaid credentials
 
+**Revised 2026-09-13:** this section originally assumed the engineering environment and the production runtime boundary were on physically separate hosts with no network path between them. The owner has since deliberately chosen to run both on one VPS, in separate directories under separate Unix users (ADR-007/ADR-010, both revised the same date; see `docs/security-model.md`'s "Trust boundaries" for the full picture). Everything below still holds — it is enforced differently now, and that difference is stated explicitly rather than left implicit.
+
 The autonomous engineering environment should use:
 
 - Plaid Sandbox credentials;
@@ -189,13 +191,13 @@ The autonomous engineering environment should use:
 - isolated PostgreSQL test containers;
 - disposable development environments.
 
-Production credentials exist only in the production runtime boundary.
+Production credentials exist only in the production runtime boundary — meaning the production directory (`/opt/finance-app`), `/etc/finance-app/**`, and the Unix user that owns them, not a separate machine.
 
-Enforce this at the harness level as well as by convention: use Claude Code permission rules (deny rules in `.claude/settings.json`) to block reads of production credential paths and to block shelling into the production host, so the boundary does not depend solely on the model's judgment.
+Enforce this at the harness level as well as by convention: use Claude Code permission rules (deny rules in `.claude/settings.json`) to block reads of production credential paths and to block the `ssh`/`scp`/`rsync`/`systemd-creds` commands. On a shared host these are policy-level denials, not network isolation — the actual technical backstop is that the production directory and credentials are owned by a Unix user the engineering session's user is not a member of and cannot `sudo` to. Both layers matter: the deny rules stop an in-policy session from reaching for the wrong command; the Unix permissions stop it even if the deny rules were ever bypassed or misconfigured. Verify periodically (`docs/runbooks/deploy.md` §1) that the permission boundary still holds — it is a silent, total loss of this entire section's guarantee if it drifts.
 
-### 4.6 No direct code editing on the production VPS
+### 4.6 No direct code editing in the production directory
 
-Claude Code must not treat the production VPS as a development workstation.
+Claude Code must not treat the production deployment (`/opt/finance-app` and everything under it) as directly editable, even when — as of 2026-09-13 — the VPS it runs on *is* the development workstation. The boundary that matters moved from "which host" to "which directory, owned by which user."
 
 Normal code path:
 
@@ -207,7 +209,7 @@ Emergency fixes should still be captured in Git and delivered through the releas
 
 ### 4.7 No self-hosted CI runner on the financial VPS
 
-Do not run arbitrary GitHub Actions/PR code on the production financial VPS.
+Do not run arbitrary GitHub Actions/PR code on the production financial VPS. This is about GitHub Actions runners specifically — distinct from the engineering (Claude Code) session sharing the VPS, which §4.5/§4.6 above cover.
 
 Use hosted/isolated CI runners and a narrow production deployment mechanism.
 
@@ -898,7 +900,7 @@ NEVER
 - bypass CI to merge/deploy
 - disable tests merely to make a change pass
 - force-push protected main
-- run arbitrary PR code on the production VPS
+- run arbitrary PR code against the production directory or its credentials (§4.5/§4.6 — engineering and production share a VPS as of 2026-09-13; the boundary is the directory/Unix-user separation, not the host)
 
 ALWAYS
 - use migrations for schema changes
@@ -1371,7 +1373,7 @@ ADR-006 Deterministic financial arithmetic
 ADR-007 Git/CI/CD is the only normal production code path
 ADR-008 Immutable container releases and rollback
 ADR-009 Isolated development environment with Plaid Sandbox
-ADR-010 Production secrets excluded from the Claude Code engineering environment
+ADR-010 Production secrets excluded from the Claude Code engineering session
 ADR-011 systemd timers for scheduled single-host jobs
 ADR-012 Daily sync remains reconciliation fallback even with webhooks
 ADR-013 Claude Code for engineering, OpenAI for the runtime financial agent (runtime-provider portion superseded by ADR-014)
@@ -1535,7 +1537,7 @@ Deliver:
 Exit criteria:
 
 - release and rollback are repeatable;
-- production app runs without the engineering environment holding runtime secrets;
+- production app runs without the engineering session holding or being able to read runtime secrets (§4.5 — enforced by directory/Unix-user separation now that engineering and production share a VPS, not by host separation);
 - backup restore test succeeds.
 
 ### Milestone 8 — Plaid webhook

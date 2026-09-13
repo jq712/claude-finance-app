@@ -37,8 +37,8 @@ Raw Plaid rows are immutable source-of-truth facts. Interpretation lives in sepa
 - bypass CI to merge or deploy
 - disable, skip, or weaken a test merely to make a change pass
 - force-push `main`
-- run arbitrary PR code on the production VPS
-- edit code directly on the production VPS
+- run arbitrary PR code against the production directory (`/opt/finance-app`) or its credentials — engineering and production now share a VPS (ADR-007/ADR-010, revised 2026-09-13); the boundary is the production directory/Unix-user/credential separation, not the host
+- edit code directly in the production directory, or read/decrypt production credentials from an engineering session — same reason
 - let a model be the sole reviewer of its own consequential change
 
 ## ALWAYS

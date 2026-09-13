@@ -37,13 +37,13 @@ This is the one case where **the correct autonomous action is to refuse to act f
 1. **Stop destructive/automatic repair.** No `finops rollback`, no migration downgrade, no manual data correction, no "let me just fix this row" — any of these can destroy the evidence needed to understand what actually happened.
 2. **Preserve evidence.**
    - `finops recent-errors --limit 200 --json` — capture sanitized operational error history.
-   - `journalctl -u finance-sync -u finance-app -u finance-backup -u finance-health --since "-48h" > incident-logs.txt` on the VPS (owner-performed — this is exactly the kind of production shell access the engineering environment never has).
+   - `journalctl -u finance-sync -u finance-app -u finance-backup -u finance-health --since "-48h" > incident-logs.txt` on the VPS (owner-performed — the engineering session's Unix user is not in the `systemd-journal` group and is not `root`, so it cannot read these units' logs even though it now shares the host; see `docs/security-model.md`'s "Trust boundaries").
    - Note the current release: `finops version`.
 3. **Take a safe snapshot before anything else touches the database.** An out-of-band `finops` backup is read-only from the database's perspective (`finance_backup` role, `SELECT` only) — running one now does not risk further mutation, and it captures the corrupted/compromised state for later analysis, which is valuable evidence even though it isn't a "clean" backup to restore from.
 4. **Write a concise incident report.** What was observed, when, which `finops` outputs support the classification, what's suspected, what has and hasn't been touched. This becomes the durable record — commit it or attach it to an issue, per CLAUDE.md's "documentation as long-term agent memory."
 5. **Require owner authorization for anything that could destroy evidence or financial records** — including a restore, a rollback, or a migration downgrade. The owner decides the next step from the incident report; an autonomous agent does not unilaterally proceed past this point.
 
-If the suspected compromise involves a credential (Plaid access token, a database role password, `BACKUP_ENCRYPTION_KEY`, a runtime provider API key), rotation is always an **owner-performed** runbook step (`docs/security-model.md` invariant 4; `docs/runbooks/deploy.md`'s rotation procedure) — the engineering environment never holds the material needed to rotate a production credential itself.
+If the suspected compromise involves a credential (Plaid access token, a database role password, `BACKUP_ENCRYPTION_KEY`, a runtime provider API key), rotation is always an **owner-performed** runbook step (`docs/security-model.md` invariant 4; `docs/runbooks/deploy.md`'s rotation procedure) — the engineering session cannot read or decrypt the material needed to rotate a production credential itself, regardless of sharing a host with production.
 
 ## Class B: full gates, still autonomous
 

@@ -6,10 +6,11 @@ Sandbox (development) and production, and for rotating it later. It is a
 one-time or occasional manual step, not a service — there is no permanent
 Link web UI running anywhere in this stack.
 
-The Claude Code engineering environment never performs this procedure and
+The Claude Code engineering session never performs this procedure and
 never sees the resulting token: it is Plaid Sandbox/production credential
 material, out of scope for the engineering agent per CLAUDE.md and
-`docs/security-model.md`.
+`docs/security-model.md` — true regardless of whether that session happens
+to share a host with production (ADR-007/ADR-010, revised 2026-09-13).
 
 ## Development (Plaid Sandbox)
 
@@ -53,8 +54,8 @@ single-user application) authenticates with their bank interactively.
 Because this is a headless single-user application, the smallest secure
 flow is a **one-time, disposable** local script, run by the owner directly
 against production Plaid credentials — never through the Claude Code
-engineering environment, never on the production VPS as a long-running
-service:
+engineering session, and never left running as a long-lived service on
+the production side, wherever it's run from:
 
 1. The owner runs a small local script (not checked into this repository
    as a running service) that calls `link_token_create` and serves Plaid

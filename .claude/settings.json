@@ -19,10 +19,10 @@
       "Bash(rsync:*)",
       "Bash(systemd-creds:*)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
+      "Bash(git push -f:*)",
+      "Bash(docker compose -f deploy/compose.yaml:*)"
     ],
     "ask": [
-      "Bash(docker compose -f deploy/compose.yaml:*)",
       "Bash(deploy/scripts/finops.sh:*)",
       "Bash(deploy/scripts/with-production-env.sh:*)",
       "Bash(alembic downgrade:*)",
