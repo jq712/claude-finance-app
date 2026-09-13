@@ -1,6 +1,6 @@
 # ADR-015: Backup encryption via GPG symmetric encryption, keyed by a single systemd credential
 
-**Status:** Accepted
+**Status:** Accepted. Unaffected by ADR-019 (2026-09-13, no Docker) in its actual decision (GPG symmetric encryption via `systemd-creds`/`LoadCredentialEncrypted=` — never Docker-specific to begin with). One implementation detail below is stale: `gnupg` is installed as a host package on the production VPS, not baked into a runtime image, since there is no image. `pg_dump` also now runs directly against the host `finance_prod` database rather than through a `finance_backup` Compose service.
 
 ## Context
 
@@ -17,7 +17,7 @@ CLAUDE.md's dependency question applies directly here: *what concrete problem do
 
 Encrypt backups with GPG symmetric encryption (`--cipher-algo AES256`), passphrase-only — no keypair, no GPG keyring management. The passphrase is a single value, `BACKUP_ENCRYPTION_KEY`, minted once via `systemd-creds encrypt` and delivered to `finance-backup.service`/`finance-restore-drill.service` as `LoadCredentialEncrypted=backup_encryption_key` (ADR-010). It is passed to `gpg` via `--passphrase-fd 0` (stdin), never as a command-line argument, so it never appears in `ps`, shell history, or a subprocess error message (`src/finance_app/ops/backup.py::_run`).
 
-`gnupg` is installed in the runtime image (`Dockerfile`) alongside `postgresql-client-17`; both are already-necessary, already-vetted Debian/PGDG packages, not a new third-party dependency.
+`gnupg` is installed as a host package on the production VPS (`apt install gnupg`) alongside `postgresql-client-17`, per ADR-019's bare-metal model — both are already-necessary, already-vetted Debian/PGDG packages, not a new third-party dependency.
 
 ## Consequences
 

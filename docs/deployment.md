@@ -1,79 +1,71 @@
 # Deployment
 
-Milestone 7 deliverable (handoff §29). Covers the production topology, the release/rollback sequence, and how CI/CD, `finops`, and systemd fit together. See `docs/architecture.md` for the system-wide picture, `docs/security-model.md` for the invariants this design enforces, `docs/backups.md` for backup/restore, and `docs/runbooks/deploy.md` for the exact owner-performed procedure (VPS provisioning, minting credentials, first deploy, rotation).
+Milestone 7 deliverable (handoff §29). Covers the production topology, the release/rollback sequence, and how CI/CD, `finops`, and systemd fit together. **Rewritten 2026-09-13 for ADR-019** (bare-metal, no Docker, `/opt/finance`) — supersedes the Docker Compose design ADR-016 described; see that ADR's own superseded note and ADR-019 for the full decision and its implementation-status table. See `docs/architecture.md` for the system-wide picture, `docs/security-model.md` for the invariants this design enforces, `docs/backups.md` for backup/restore, and `docs/runbooks/deploy.md` for the exact owner-performed procedure.
 
-## What exists today
+## What exists today vs. what this document describes
 
-Everything up to "an owner-performed action once the VPS is provisioned": the Docker image, the production Compose file, systemd units, the CI/CD pipeline through image publish/migration-preflight/staging-smoke, and the `finops deploy`/`rollback`/`restart` commands that will operate on the real VPS once it exists. **No production VPS is provisioned yet.** `.github/workflows/ci.yml`'s `production-deploy` job is a deliberate no-op gate that records release readiness in the job summary — it does not SSH anywhere or fake a deploy target, per ADR-007/ADR-010. The first real deploy is a manual, owner-performed run of `finops deploy <sha>` on the VPS, documented step by step in `docs/runbooks/deploy.md`.
+This document describes the **target** architecture (ADR-019). As of 2026-09-13, **none of the bare-metal release mechanism is built yet** — `finops deploy`/`rollback`/`restart` and `src/finance_app/ops/compose.py` still implement the superseded Docker Compose design end to end, and CI's `container-build`/`publish-image`/`migration-preflight`/`staging-smoke` jobs still build and push a Docker image. This is a documentation-only pass; a follow-up session implements the rewrite described below. Do not treat any Docker reference still live in the codebase as current guidance — it's the thing being replaced, not an alternative design. **No production deployment is provisioned yet** either way: `/opt/finance` doesn't exist on the VPS, and neither does the second `finance_prod` database.
 
 ## Topology
 
 ```
-app        finance-app image (Dockerfile) — finance/finops entrypoints,
-           plus deploy/scripts/*.sh's pg_dump/pg_restore/gpg dependencies.
-           Not long-running until Milestone 8 (ADR-016 D2): profile-gated,
-           started only as one-shot `docker compose --profile app run
-           --rm app <cmd>` (the post-deploy `finance selfcheck` probe,
-           interactive `finance chat`) — never `up -d`, never `restart:`.
-postgres   postgres:17-alpine, not publicly exposed
-caddy      reverse proxy for the future Plaid webhook (Milestone 8) —
-           behind the `webhook` Compose profile, not started by default
+Dev tree (this repository)     /opt/finance (production, bare metal)
+  finance_dev on the host        finance_prod on the same host
+  PostgreSQL instance             PostgreSQL instance
+  .env / .env.dev                 releases/<sha>/, current -> releases/<sha>
+  Claude Code operates here       systemd units invoke current/.venv/bin/*
+                                   Claude Code never edits this directory
 ```
 
-`migrate`, `sync`, `backup`, `finops`, and `deploy` are further one-shot, profile-gated services splitting out the credentials/authority each job actually needs (ADR-016 D1) — see `deploy/compose.yaml`'s own header comment for the full per-service breakdown.
+One host PostgreSQL server, two logical databases (`finance_dev`, `finance_prod`) — not two installs, not containers. `/opt/finance` is release directories plus a `current` symlink (the standard bare-metal release convention: rollback is a symlink repoint, not a rebuild), owned by a dedicated production Unix user the engineering session's user cannot read or write as (`docs/runbooks/deploy.md` §1, `docs/security-model.md`'s "Trust boundaries"). No image, no registry, no container runtime anywhere in this application's own stack (CI's use of a Postgres *service container* to provision a throwaway test database for `pytest` is GitHub Actions' own test infrastructure and is unrelated).
 
-`deploy/compose.yaml` is the production Compose file (`deploy/compose.dev.yaml` stays the disposable dev/CI Postgres-only container — don't confuse the two). No secret is ever baked into the image or the Compose file. Credential-shaped environment variables are **not** enforced required by Compose itself (`${VAR:-}` everywhere, ADR-016 D1 — Compose interpolates the whole file regardless of which service is selected, so a whole-file `${VAR:?...}` can't express a per-job requirement); `deploy/scripts/with-production-env.sh` enforces per-job presence instead, before `docker compose` ever runs, and a drift test keeps its job matrix in sync with this file. Every credential is supplied at container start from systemd encrypted credentials (ADR-010), never a plaintext `.env` in production.
+Credentials live in `/opt/finance/.env` (mode 600, production Unix user only) plus systemd encrypted credentials for anything a unit needs decrypted at process start — never a plaintext file this repository can read, never baked into anything, exactly as before, just without a container boundary in the story.
 
-## Release sequence (ADR-007, ADR-008)
+## Release sequence (ADR-007, ADR-019)
 
 ```
 push to main
-  -> lint/typecheck, unit, integration, security, agent-evals, secret-scan, container-build   (existing CI, extended)
-  -> publish-image        build + tag by Git SHA + push to ghcr.io/<owner>/<repo>
-  -> migration-preflight  `alembic upgrade head` from inside the packaged image, fresh DB
-  -> staging-smoke        deploy/compose.yaml brought up on the runner with the new image;
-                          finops health / finance status must succeed
-  -> production-deploy    gated by the `production` GitHub Environment (manual approval) —
-                          currently a no-op that records readiness; see "What exists today"
-  -> [owner, on the VPS]  finops deploy <sha>
-  -> post-deploy health verification, automatic rollback on failure (finops deploy itself)
-  -> release recorded in ops.releases
+  -> lint/typecheck, unit, integration, security, agent-evals, secret-scan   (existing CI)
+  -> [owner]              copy a known, CI-green git ref into
+                           /opt/finance/releases/<sha>/
+  -> [owner]              back up finance_prod
+  -> [owner]              alembic upgrade head against finance_prod,
+                           from the new release directory
+  -> [owner]              repoint /opt/finance/current -> releases/<sha>
+  -> [owner]              systemctl restart the production units
+  -> [owner]              finops health / finance status against finance_prod
+                           to confirm; repoint `current` back and restart
+                           again if unhealthy (ADR-008's "one rollback step"
+                           principle, now a symlink swap)
+  -> release recorded (mechanism TBD by the follow-up session — some
+     equivalent of today's ops.releases bookkeeping, against finance_prod)
 ```
 
-Every job through `staging-smoke` runs on every push to `main` unconditionally. `production-deploy` requires the `production` GitHub Environment's required reviewers to approve — configure that once in **repo Settings → Environments → production** (`docs/runbooks/deploy.md`); until it's configured, that job runs unattended, which is harmless pre-VPS but must be set before a real deploy depends on it.
+No image build, no registry, no `production-deploy` GitHub Environment gate in the old sense — a follow-up session decides what (if anything) CI's own gating looks like for "this git ref is safe to copy to `/opt/finance`" once the release mechanism itself is designed. Until then, treat every push to `main` that's green through the existing test/lint/security/eval jobs as a candidate the owner may deploy by hand, per the runbook.
 
-## `finops deploy` / `rollback` / `restart`
+## `finops deploy` / `rollback` / `restart` — target design
 
-These three commands are the *only* place `finops` changes production state (every other command that touches the database — `health`, `sync-status`, `db-status`, `migration-status`, `backup-status`, `recent-errors` — is a read-only query through the `finance_observer` role; `version` doesn't connect to a database at all, it just prints the in-process version string and the `RELEASE_ID` env var). They are meant to run **on the VPS**, operating on the Compose stack already running there:
+These three commands stay the *only* place `finops` changes production state (every other command — `health`, `sync-status`, `db-status`, `migration-status`, `backup-status`, `recent-errors` — stays a read-only query through `finance_observer`). What changes is what they actually do:
 
-- **`finops deploy <sha>`** — validates `<sha>` looks like a Git SHA (refuses anything else; `latest` is never accepted here even though the image carries that tag too), records a `ops.releases` row (`status="pending"`), runs `docker compose pull` and the migration preflight with `RELEASE_ID=<sha>`, then health-checks the release via `deploy_health_check` (ADR-016 D3: wraps `probe_release`, a one-shot `docker compose --profile app run --rm app finance selfcheck --json` against the exact image being deployed, pinned to `<sha>` — not a persistent `app` container, which does not exist until Milestone 8's webhook server; there is no `up -d`/bring-up step). Healthy and reporting the right release id → promoted to `current` (the prior `current` becomes `previous`). Unhealthy, unreachable, or reporting the wrong release id → marked `failed` and **`finops deploy` automatically rolls back** to the previous known-good release (ADR-008) before exiting non-zero.
-- **`finops rollback`** — the same rollback mechanics, invokable directly: confirms the tracked `previous` release's image still selfchecks healthy (`probe_release`, no rebuild, no registry fetch beyond what's already local, and — like `deploy` — no `up -d`/bring-up step) and, only if healthy, flips `ops.releases` bookkeeping back to it. Refuses (raises rather than promoting) if that target itself fails its own selfcheck.
-- **`finops restart`** — ADR-016 D2: `app` is a one-shot command until Milestone 8, not a long-running process, so there is nothing to restart; this instead reads the currently-recorded `current` release id (`finance_observer`, read-only) and re-runs `probe_release` against it, reporting whether it's still healthy. Never writes to `ops.releases`.
+- **`finops deploy <sha>`** — validates `<sha>` looks like a Git SHA, records a release-tracking row, copies/confirms the release directory exists at `/opt/finance/releases/<sha>/` (or expects the owner to have already done so — exact division of labor between the owner's copy step and what `finops deploy` itself automates is a follow-up design decision), runs the migration preflight against `finance_prod`, health-checks via the release directory's own `finance selfcheck`, and on success repoints `current` and restarts the production systemd units. Unhealthy → automatic rollback to the previous release directory (ADR-008's principle, unchanged).
+- **`finops rollback`** — repoints `current` back to the tracked previous release directory and restarts, after confirming that release still selfchecks healthy. No rebuild, nothing to pull — even more literally "no registry fetch beyond what's already local" than the Docker design, since there's no registry at all.
+- **`finops restart`** — re-runs the health selfcheck against whichever release `current` points at and restarts the production units if needed. Never changes `current`.
 
-All three shell out to `docker compose` via `src/finance_app/ops/compose.py`, with the actual subprocess call injectable so the bookkeeping (`src/finance_app/ops/release.py`) is unit-testable without a Docker daemon. None of them accept a SQL string, a shell string, or an SSH target — the command surface is fixed (handoff §10's "no arbitrary SQL/shell" applies to deployment exactly as it applies to diagnosis).
+None of them accept a SQL string, a shell string, or an SSH target — the command surface stays fixed (handoff §10's "no arbitrary SQL/shell" applies to deployment exactly as it applies to diagnosis). What they shell out to changes from `docker compose` (`src/finance_app/ops/compose.py`) to whatever direct-process/systemd invocation the follow-up session designs — the bookkeeping module (`src/finance_app/ops/release.py`) needs no conceptual change, since it never depended on Docker in the first place (it only tracks release identifiers and current/previous/failed/rolled_back status).
 
 ## Health checks and automatic rollback
 
-`finops health` (read-only, `finance_observer`) aggregates:
-
-- **database** — reachable
-- **migrations** — the DB's applied Alembic revision matches the repo's head revision
-- **sync** — the most recent `ops.sync_runs` row isn't `error` and isn't more than ~36h old
-- **backup** — the most recent backup has a successful restore-verification within the last 14 days
-
-`overall` is `healthy` only if database/migrations are fine and sync isn't `error`/`stale` (a fresh install with no sync yet is not treated as unhealthy — `never_run` is a distinct state). `finops deploy` calls this exact function immediately after bringing the new release up; a non-`healthy` result is what triggers the automatic rollback described above.
-
-Separately, `finance-health.timer` runs `python -m finance_app.ops.health` every 15 minutes — the same aggregate check, but via the `finance_app` role so it can additionally write an `ops.errors` row when unhealthy (see `src/finance_app/ops/health.py`'s module docstring for why that path uses a different role than the `finops health` CLI command).
+Unchanged in design from before — `finops health` (read-only, `finance_observer`) aggregates database reachability, migration-head match, sync freshness, and backup verification freshness exactly as it did under the Docker design; `finance-health.timer` still runs the same aggregate check every 15 minutes via the `finance_app` role. None of this was ever Docker-specific.
 
 ## Rollback semantics
 
-ADR-008: exactly one rollback step is guaranteed trivial — current ↔ previous. `ops.releases` tracks at most one `current` row and at most one `previous` row (`src/finance_app/ops/release.py`); anything older is left as plain history, not an arbitrary-depth undo stack. If a second consecutive deploy also fails, `finops rollback` still returns to the last-known-good release, because `mark_failed` never touches the `current`/`previous` bookkeeping — only `mark_healthy` does.
+ADR-008's principle, carried into ADR-019 exactly as stated there: exactly one rollback step is guaranteed trivial — current ↔ previous, now a `current` symlink repoint instead of an image tag swap. `ops.releases` (or its bare-metal equivalent) tracks at most one `current` row and at most one `previous` row; anything older is left as plain history. If a second consecutive deploy also fails, `finops rollback` still returns to the last-known-good release, because a failed deploy attempt never touches the `current`/`previous` bookkeeping.
 
-`probe_release`'s `wrong_image` check (ADR-016 D3) compares the image's build-time-baked identity — `IMAGE_RELEASE_ID`, set once at `docker build` time from CI's `RELEASE_ID=<sha>` build-arg — against the release id requested, never the runtime `RELEASE_ID` environment variable the check itself injects. **One-time migration note:** any release image built before this check existed has no baked identity, so `probe_release` reports it `wrong_image` and `finops rollback`/`restart` refuse it with "manual intervention required" — a genuine, if narrow, gap in "rollback is one step" for exactly the release that introduces this check. There is no legacy fallback by design (treating a missing identity as trustworthy would defeat the point of the check); the resolution is to `finops deploy <sha>` a post-change image, after which normal rollback semantics resume.
+The `wrong_image`/build-time-identity verification ADR-016 D3 added (`IMAGE_RELEASE_ID` baked at `docker build` time) has no equivalent need under ADR-019: there is no image to mistake for another. The health check that matters is the same one — does the release directory's own `finance selfcheck` report itself healthy at the expected migration head — without a separate "is this actually the release I asked for" layer, since a release directory's contents are exactly what was copied there, not something a registry pull could silently substitute.
 
 ## Deliberately deferred
 
-- **ADR-016 D8 (release-id propagation to the scheduled jobs) is not yet implemented**, despite being in scope for this milestone. `finops deploy`/`rollback` set `RELEASE_ID` only in the environment of their own `docker compose` child processes; nothing writes it back to `/etc/finance-app/env`, which is what `finance-sync.timer`, `finance-backup.timer`, `finance-health.timer`, and `finance-restore-drill.timer` read via `EnvironmentFile=`. Until this lands, those scheduled jobs resolve `${RELEASE_ID:-latest}` independently of what was actually deployed or rolled back — see ADR-016 D8 for the design and its implementation-status note for current state.
-- **Real VPS provisioning** — no cloud/hosting credentials exist in this engineering environment, and per ADR-010/handoff §4.5 none should. `docs/runbooks/deploy.md` documents the exact procedure for when the owner provisions one.
-- **Milestone 8's webhook endpoint** — `deploy/caddy/Caddyfile` and the `caddy` Compose service are scaffolded (`profiles: ["webhook"]`, not started by default) so Milestone 8 only has to fill in the route, not design the topology.
-- **A "canary"/gradual rollout mechanism** — out of scope for a single-user, single-instance application; `finops deploy`'s all-or-nothing health-gated promotion is the appropriate amount of ceremony here (CLAUDE.md: don't add complexity without a demonstrated need).
+- **The entire bare-metal release mechanism** (ADR-019) — `/opt/finance` provisioning, the release-copy script, `finops deploy`/`rollback`/`restart` rewritten, CI's Docker-shaped jobs redesigned, Settings/CLI's explicit-prod-opt-in. See ADR-019's implementation-status table for the full list; this is a follow-up session's work, not done in this documentation pass.
+- **Real production provisioning on the shared VPS** — the engineering workspace's own host is the intended production host (ADR-007/ADR-010/ADR-019), but `/opt/finance`, its Unix user, and `finance_prod` don't exist yet. `docs/runbooks/deploy.md` documents the procedure.
+- **Milestone 8's webhook endpoint** — was scaffolded via a Compose `caddy` service under the old design; a follow-up session needs a bare-metal equivalent (a host-installed reverse proxy, or Python serving TLS directly) once this milestone's rewrite lands.
+- **A "canary"/gradual rollout mechanism** — out of scope for a single-user, single-instance application; all-or-nothing health-gated promotion is the appropriate amount of ceremony here (CLAUDE.md: don't add complexity without a demonstrated need).

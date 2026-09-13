@@ -12,7 +12,7 @@ A single Python application, `src/finance_app/`, with enforced internal module b
 
 ## Consequences
 
-- One image to build, deploy, roll back, and reason about.
+- One release directory to build, deploy, roll back, and reason about (ADR-019, revised 2026-09-13 — no Docker image; a copied git ref instead).
 - Module seams are maintained by review and import discipline rather than by network boundaries — the architecture agent owns this.
 - Both the CLI and the conversational agent sit on the same `analytics/` layer, so there is exactly one implementation of every financial calculation.
 

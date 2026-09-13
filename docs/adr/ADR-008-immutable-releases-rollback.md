@@ -1,6 +1,6 @@
 # ADR-008: Immutable container releases and rollback
 
-**Status:** Accepted
+**Status:** Mechanism superseded by ADR-019 (2026-09-13, no Docker) — see that ADR for the current release/rollback design. The principle this ADR established (exactly one rollback step guaranteed trivial; current/previous releases always tracked; automatic rollback on failed health checks) carries over unchanged to ADR-019's symlink-based release model; only "container image tag" → "release directory symlink" changed. Kept as the historical record of the original container-based design — do not implement against it going forward.
 
 ## Context
 

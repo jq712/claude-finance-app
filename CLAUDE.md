@@ -16,7 +16,7 @@ A secure, single-user, headless financial intelligence application. One Plaid It
 - The **runtime** financial agent is provider-interchangeable (OpenAI or the Claude API, via `AGENT_PROVIDER`) — see ADR-014 and handoff §8.4
 - Claude Code is the **engineering** agent — always a different system from the runtime agent, even when the runtime agent is configured to use a Claude-family model. Never conflate them.
 - Plaid Transactions Sync (incremental, cursor-based), daily systemd timer
-- Docker + Compose, single Linux VPS, no Kubernetes
+- No Docker (ADR-019, 2026-09-13 — supersedes the earlier Compose-based design in ADR-016). Bare-metal on a single Linux VPS, no Kubernetes: production is a release directory under `/opt/finance` with a `current` symlink, run by systemd units invoking a virtualenv directly. One host PostgreSQL instance, two databases (`finance_dev`, `finance_prod`)
 
 ## The one idea that matters
 
@@ -37,8 +37,8 @@ Raw Plaid rows are immutable source-of-truth facts. Interpretation lives in sepa
 - bypass CI to merge or deploy
 - disable, skip, or weaken a test merely to make a change pass
 - force-push `main`
-- run arbitrary PR code on the production VPS
-- edit code directly on the production VPS
+- run arbitrary PR code against `/opt/finance` or its credentials — engineering and production share a VPS (ADR-007/ADR-010/ADR-019, revised 2026-09-13); the boundary is the `/opt/finance`/Unix-user separation, not the host
+- edit code directly in `/opt/finance`, or read/decrypt production credentials from an engineering session — same reason
 - let a model be the sole reviewer of its own consequential change
 
 ## ALWAYS
@@ -78,9 +78,9 @@ Use the subagents in `.claude/agents/` for their specialties. Never let the suba
 - Branch per unit of work; PR into `main`. No direct commits to `main`.
 - `uv` for dependency and environment management.
 - `ruff format` + `ruff check` + `pyright` must be clean before a change is done.
-- Tests run against a real PostgreSQL container, not SQLite.
+- Tests run against a real PostgreSQL instance (`finance_dev`, or CI's own Postgres service container), not SQLite.
 - Plaid Sandbox credentials only. If a task appears to need production Plaid credentials, stop and escalate — that is a design error, not a credential problem.
-- Do not add a dependency, service, or framework without answering: what concrete problem does it solve *now*, can Postgres/systemd/Docker/plain Python do it more simply, and what new failure mode does it introduce?
+- Do not add a dependency, service, or framework without answering: what concrete problem does it solve *now*, can Postgres/systemd/plain Python do it more simply, and what new failure mode does it introduce? (No Docker — ADR-019.)
 
 ## Definition of done
 
@@ -93,7 +93,8 @@ uv sync                      # install
 uv run pytest                # tests
 uv run ruff format . && uv run ruff check --fix .
 uv run pyright
-docker compose -f deploy/compose.dev.yaml up -d    # dev Postgres
+# dev Postgres: a host-installed PostgreSQL instance, `finance_dev` database
+# (ADR-019 — no Docker; no `docker compose -f deploy/compose.dev.yaml` anymore)
 uv run alembic upgrade head
 ```
 

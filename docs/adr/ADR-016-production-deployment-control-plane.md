@@ -1,6 +1,6 @@
 # ADR-016: Production deployment control plane — Compose interpolation, the long-running-service question, and release-promotion concurrency
 
-**Status:** Accepted
+**Status:** Superseded by ADR-019 (2026-09-13) — the owner decided against Docker entirely (both for production and for local dev), which removes this ADR's whole subject (Compose service topology, per-job credential environment variables, `docker compose`-driven `finops deploy`/`rollback`/`restart`). Kept as the historical record of the design and the several rounds of adversarial review that hardened it; several of its underlying principles (narrow per-job credential scope, one-shot health probe against the exact release before promotion, one rollback step guaranteed trivial) carry forward into ADR-019's bare-metal design. Do not implement any further part of this ADR — the implementation-status table below is frozen at its state on the day this was superseded, not a live backlog.
 
 ## Implementation status
 
