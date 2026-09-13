@@ -22,7 +22,10 @@ session:
    cleanly and leaves a note (PR description, commit message, or GitHub issue) rather than
    idling or guessing.
 6. Never touches production. `finops deploy`/`rollback` stay an owner-performed action
-   regardless of class (ADR-017) — there is no production VPS yet either way.
+   regardless of class (ADR-017) — no production deployment is provisioned yet, and even once
+   it is, the autonomous session's Unix user has no read access to `/opt/finance` or its
+   credentials (ADR-007/ADR-010/ADR-019, revised 2026-09-13 — engineering and production share
+   a VPS, no Docker; see `docs/security-model.md`'s "Trust boundaries").
 
 ## What to check after a run
 

@@ -1,6 +1,6 @@
 # ADR-011: systemd timers for scheduled single-host jobs
 
-**Status:** Accepted
+**Status:** Accepted. Unaffected by ADR-019 (2026-09-13, no Docker) in principle — systemd timers were always the scheduling mechanism regardless of packaging. Only each unit's `ExecStart=` changes, from `docker compose run ...` to a direct virtualenv-binary invocation under `/opt/finance/current`.
 
 ## Context
 

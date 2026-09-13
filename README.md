@@ -2,7 +2,7 @@
 
 A single-user, headless financial intelligence application. One Plaid Item → PostgreSQL → deterministic analytics → a CLI plus a conversational financial agent, running on one Linux VPS.
 
-**Status:** Milestones 0–6 complete (database foundation, Plaid sync, deterministic analytics, CLI, provider-interchangeable conversational agent, agent eval framework). Milestone 7 (production deployment — Docker/Compose topology, hardened systemd units, CI/CD build/publish/preflight/staging/gate, backup encryption, release/rollback bookkeeping) is in progress on `milestone-7-production-deployment`; no production VPS is provisioned yet. `finance chat` is a conversational interface to the analytics layer, running on a provider-interchangeable runtime agent (OpenAI or the Claude API, via `AGENT_PROVIDER` — [ADR-014](docs/adr/ADR-014-provider-interchangeable-runtime-agent.md)) with a fixed semantic tool set, read-only on `plaid.*`. The deterministic `finance` CLI (`status`, `sync`, `spending`, `income`, `cashflow`, `budget`, `transactions recent`/`search`) still requires no LLM. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design, [`docs/analytics.md`](docs/analytics.md) for the analytics design, [`docs/cli.md`](docs/cli.md) for the CLI, [`docs/financial-agent.md`](docs/financial-agent.md) for the runtime agent, and [`docs/deployment.md`](docs/deployment.md) for the production topology.
+**Status:** Milestones 0–6 complete (database foundation, Plaid sync, deterministic analytics, CLI, provider-interchangeable conversational agent, agent eval framework). Milestone 7 (production deployment — bare-metal `/opt/finance` topology, hardened systemd units, CI/CD, backup encryption, release/rollback bookkeeping) is in progress on `milestone-7-production-deployment`; no production deployment is provisioned yet. **No Docker** (ADR-019, revised 2026-09-13, supersedes ADR-016's Compose-based design): the engineering workspace and production share one VPS, but production is a bare-metal `/opt/finance` release directory, never this repository, a second Claude Code worktree, or a container — see ADR-019 and `docs/security-model.md`. `finance chat` is a conversational interface to the analytics layer, running on a provider-interchangeable runtime agent (OpenAI or the Claude API, via `AGENT_PROVIDER` — [ADR-014](docs/adr/ADR-014-provider-interchangeable-runtime-agent.md)) with a fixed semantic tool set, read-only on `plaid.*`. The deterministic `finance` CLI (`status`, `sync`, `spending`, `income`, `cashflow`, `budget`, `transactions recent`/`search`) still requires no LLM. See [`CLAUDE_FINANCE_APP_HANDOFF.md`](CLAUDE_FINANCE_APP_HANDOFF.md) §29 for the milestone plan, [`docs/database.md`](docs/database.md) for the schema, [`docs/plaid-sync.md`](docs/plaid-sync.md) for the sync design, [`docs/analytics.md`](docs/analytics.md) for the analytics design, [`docs/cli.md`](docs/cli.md) for the CLI, [`docs/financial-agent.md`](docs/financial-agent.md) for the runtime agent, and [`docs/deployment.md`](docs/deployment.md) for the production topology.
 
 ## The core idea
 
@@ -52,14 +52,15 @@ docs/
 src/finance_app/          (Milestone 0+) the application
 migrations/               (Milestone 1) Alembic
 tests/                    (Milestone 0+) unit, integration, security, evals
-deploy/                   (Milestone 7) Compose, systemd, Caddy
+deploy/                   (Milestone 7) systemd, Caddy — no Docker (ADR-019)
 ```
 
 ## Getting started
 
 ```bash
 uv sync
-docker compose -f deploy/compose.dev.yaml up -d
+# dev Postgres: a host-installed PostgreSQL instance, `finance_dev` database
+# (ADR-019 — no Docker; no `docker compose -f deploy/compose.dev.yaml` anymore)
 uv run alembic upgrade head
 uv run pytest
 uv run ruff format . && uv run ruff check .
@@ -76,8 +77,8 @@ This runs under the standing autonomy contract in [ADR-017](docs/adr/ADR-017-aut
 
 ## Guardrails you will hit
 
-`.claude/settings.json` denies reads of credential paths and blocks `ssh`/`scp` — the engineering environment has no path to production. A `PreToolUse` hook refuses edits to committed Alembic migrations; corrections go forward as new revisions. These encode invariants from handoff §4. If one blocks you, the approach is wrong, not the guardrail.
+`.claude/settings.json` denies reads of credential paths and blocks `ssh`/`scp`/`systemd-creds` — the engineering session cannot read `/opt/finance` or its credentials, even though it shares a VPS with production (ADR-007/ADR-010/ADR-019, revised 2026-09-13 — see `docs/security-model.md`). A `PreToolUse` hook refuses edits to committed Alembic migrations; corrections go forward as new revisions. These encode invariants from handoff §4. If one blocks you, the approach is wrong, not the guardrail.
 
 ## Security
 
-Development uses Plaid Sandbox and synthetic fixtures exclusively. Production credentials exist only inside the production runtime boundary as systemd encrypted credentials — never in this repository, in CI, or in an agent session. Never commit a real credential or real financial data.
+Development uses Plaid Sandbox and synthetic fixtures exclusively. Production credentials exist only inside `/opt/finance/.env` (mode 600) and systemd encrypted credentials — never in this repository, in CI, or in an agent session, even though the engineering workspace and production now share a VPS (`docs/security-model.md`). Never commit a real credential or real financial data.

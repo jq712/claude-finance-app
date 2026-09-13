@@ -17,6 +17,6 @@ Planned (created with the milestone that makes them real):
 
 | Runbook | Milestone |
 |---|---|
-| `webhook.md` — provisioning the webhook domain/TLS, enabling the `caddy` Compose profile, webhook secret rotation | 8 |
+| `webhook.md` — provisioning the webhook domain/TLS, enabling the host-installed Caddy reverse proxy (no Docker — ADR-019), webhook secret rotation | 8 |
 
 When an incident reveals a procedure that was not written down, write it here in the same change that resolves the incident.

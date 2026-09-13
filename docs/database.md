@@ -16,7 +16,7 @@ Milestone 1 deliverable. PostgreSQL, SQLAlchemy 2.x models, Alembic migrations. 
 
 ## Roles
 
-Created by `migrations/versions/0002_..._roles_and_grants.py`. `finance_migrator` is not created there — it is the container/cluster bootstrap role (`deploy/compose.dev.yaml`'s `POSTGRES_USER` in dev; a real Postgres role with `CREATEROLE`/DDL rights in production) and is what migrations connect as.
+Created by `migrations/versions/0002_..._roles_and_grants.py`. `finance_migrator` is not created there — it is the cluster bootstrap role (the host PostgreSQL instance's own superuser-ish role in dev, per ADR-019 — no Docker, no container `POSTGRES_USER`; a real Postgres role with `CREATEROLE`/DDL rights in production) and is what migrations connect as. One host PostgreSQL instance serves both `finance_dev` and `finance_prod` as separate logical databases (ADR-019); this role table applies identically to each.
 
 | Role | Grants | Used by |
 |---|---|---|
@@ -44,7 +44,7 @@ Passwords resolve from `<ROLE>_DB_PASSWORD` environment variables, falling back 
 ## Verifying the boundary
 
 ```bash
-docker compose -f deploy/compose.dev.yaml up -d
+# host PostgreSQL instance running, finance_dev database created (ADR-019 — no Docker)
 uv run alembic upgrade head
 uv run pytest tests/integration -v -m integration   # migrations + repositories
 uv run pytest tests/security -v -m integration       # finance_agent cannot mutate plaid.*

@@ -22,7 +22,10 @@ unattended, for a project whose whole reason for existing is handling real finan
    was never actually reachable — Milestone 7's real release sequence
    (`docs/deployment.md`) gates `production-deploy` behind the `production` GitHub
    Environment's manual approval and an explicit `[owner, on the VPS] finops deploy <sha>`
-   step, for every class, and no production VPS exists yet regardless. But the *wording*
+   step, for every class, and no production deployment is provisioned yet regardless (as of
+   2026-09-13 the "VPS" itself is shared with the engineering workspace, bare-metal, no Docker —
+   ADR-007/ADR-010/ADR-019 — but the production side of that boundary still doesn't exist). But
+   the *wording*
    promised more autonomy than the built system grants, which is exactly the kind of gap that
    bites the first time it's exercised rather than read.
 2. **§32's "ask only when truly blocked" assumes someone is there to answer.** It's fine advice
