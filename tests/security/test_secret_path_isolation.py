@@ -20,10 +20,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Anything that would route a dev/CI process at the VPS's real,
 # systemd-decrypted production credential material. Matched as plain
 # substrings -- deliberately conservative, see module docstring.
+#
+# `/opt/finance/.env` and a literal `FINANCE_ENV_FILE=` assignment are
+# ADR-019's bare-metal equivalent of the Docker-era markers above: the one
+# environment variable that opts a process into reading real production
+# DSNs (`config/env.py`, `config/settings.py`'s explicit-prod-opt-in
+# guard). A dev/CI-facing file that sets it, even as an example, defeats
+# the guard's whole premise the same way a stray `CREDENTIALS_DIRECTORY`
+# would have under the Docker model.
 _PRODUCTION_SECRET_MARKERS = (
     "/etc/finance-app/credentials",
     "LoadCredentialEncrypted",
     "CREDENTIALS_DIRECTORY",
+    "/opt/finance/.env",
+    "FINANCE_ENV_FILE=",
 )
 
 # Files a dev/CI workflow actually executes against. Excludes
@@ -34,6 +44,7 @@ _PRODUCTION_SECRET_MARKERS = (
 _DEV_AND_CI_FILES = (
     REPO_ROOT / "deploy" / "compose.dev.yaml",
     REPO_ROOT / ".github" / "workflows" / "ci.yml",
+    REPO_ROOT / ".env.example",
 )
 
 

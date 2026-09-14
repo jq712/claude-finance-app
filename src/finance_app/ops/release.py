@@ -1,10 +1,12 @@
-"""Release bookkeeping (handoff §19, ADR-008).
+"""Release bookkeeping (handoff §19, ADR-008, revised for ADR-019's
+bare-metal deploy model).
 
-Pure database operations over `ops.releases` — no Docker/subprocess calls
-live here. `finance_app.cli.finops`'s `deploy`/`rollback`/`restart`
-commands call into this module for state and separately shell out to
-`docker compose` for the actual container operation, so the state
-transitions here stay unit-testable without a real container runtime.
+Pure database operations over `ops.releases` — no filesystem/subprocess
+calls live here. `finance_app.cli.finops`'s `deploy`/`rollback`/`restart`
+commands call into this module for state and separately shell out to the
+release directory's own venv binary / `systemctl` (`ops/host.py`) for the
+actual host operation, so the state transitions here stay unit-testable
+without a real production host.
 
 Model, per ADR-008 ("track both current and previous known-good release
 so rollback is one command"), enforced by `migrations/versions/
@@ -163,12 +165,17 @@ def _reap_stale_pending_deploys(session: Session) -> None:
     )
 
 
-def start_deploy(session: Session, *, release_id: str, image_ref: str) -> Release:
+def start_deploy(session: Session, *, release_id: str, artifact_ref: str) -> Release:
     """Record a new deploy attempt. Does not touch the existing current/
     previous rows yet — that only happens once the new release is
     confirmed healthy (`mark_healthy`) or confirmed failed (`mark_failed`),
     so a crash mid-deploy never leaves the tracked state pointing at a
     release that was never actually verified.
+
+    `artifact_ref` is a release directory path under ADR-019's bare-metal
+    model (a GHCR image ref under the superseded Docker model) — this
+    function's own logic has no opinion on which; it just records
+    whatever the caller passes.
 
     Captures `replaces_release_id` — whatever is `current` right now —
     so a later failed-deploy rollback can target it directly (QA-2)."""
@@ -176,7 +183,7 @@ def start_deploy(session: Session, *, release_id: str, image_ref: str) -> Releas
     replaces = get_current(session)
     release = Release(
         release_id=release_id,
-        image_ref=image_ref,
+        artifact_ref=artifact_ref,
         status="pending",
         replaces_release_id=replaces.release_id if replaces is not None else None,
     )

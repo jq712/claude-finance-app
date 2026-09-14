@@ -103,7 +103,10 @@ class Release(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     release_id: Mapped[str] = mapped_column(String(64))  # immutable Git SHA
-    image_ref: Mapped[str] = mapped_column(String(512))
+    # A GHCR image ref under the superseded Docker model (ADR-016); a
+    # release directory path (`/opt/finance/releases/<sha>`) under ADR-019.
+    # Renamed from `image_ref` in migrations/versions/0006.
+    artifact_ref: Mapped[str] = mapped_column(String(512))
     # "pending" | "current" | "previous" | "history" | "failed" | "rolled_back"
     status: Mapped[str] = mapped_column(String(32))
     deployed_at: Mapped[datetime.datetime] = mapped_column(

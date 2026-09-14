@@ -2,10 +2,14 @@
 (QA round 2 + round 3, Milestone 7 — handoff §19/§20, ADR-007, ADR-008,
 ADR-016).
 
-Round 1 (`tests/unit/test_ops_compose_env_regression.py`) proved that
-`run_compose` merges rather than replaces the environment. Round 2 found
-three defects in the pre-ADR-016 topology (all fixed by ADR-016's D1/D2/D7)
-and one probe design flaw (QA-26, fixed by D3's `probe_release`). Round 3
+Round 1 (`tests/unit/test_ops_host_env_regression.py`, formerly
+`test_ops_compose_env_regression.py`) proved that the runner-invocation
+wrapper merges rather than replaces the environment. Round 2 found three
+defects in the pre-ADR-016 topology (all fixed by ADR-016's D1/D2/D7) and
+one probe design flaw (QA-26, fixed by D3's `probe_release` — its own
+tests moved to `test_deploy_topology_baremetal.py` under ADR-019, since
+they no longer touch anything in this file's Docker-Compose-topology
+subject matter). Round 3
 found that ADR-016's own D1 implementation (`deploy/scripts/
 with-production-env.sh`) introduced two new defects of its own — a
 plaintext credential temp file that survived `exec` (never cleaned up) and
@@ -26,7 +30,6 @@ of a regex guess at them.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -35,9 +38,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-
-from finance_app.ops.compose import ComposeError
-from finance_app.ops.status import probe_release
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILE = _REPO_ROOT / "deploy" / "compose.yaml"
@@ -516,96 +516,3 @@ def test_restore_verify_removes_the_scratch_password_only_after_readiness() -> N
         "the scratch password file must be removed only after the readiness loop, "
         "not immediately after `docker run -d`"
     )
-
-
-# ---------------------------------------------------------------------------
-# D3 — probe_release replaces the exec-based, timing-dependent probe.
-# ---------------------------------------------------------------------------
-
-
-def test_probe_release_reports_healthy_when_the_right_release_selfchecks_clean() -> None:
-    payload = json.dumps(
-        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
-    )
-
-    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return subprocess.CompletedProcess([], 0, payload + "\n", "")
-
-    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
-    assert result["status"] == "healthy"
-    assert result["reported_release_id"] == "abc1234"
-
-
-_HEALTHY_ABC1234 = json.dumps(
-    {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
-)
-
-
-@pytest.mark.parametrize(
-    "stdout",
-    [
-        _HEALTHY_ABC1234 + "\n",
-        "Creating network...\n" + _HEALTHY_ABC1234,
-        _HEALTHY_ABC1234 + "\nContainer app-run-1  Removed\n",
-        _HEALTHY_ABC1234 + '\n{"level": "info", "msg": "done"}\n',
-    ],
-    ids=["clean", "leading-chatter", "trailing-chatter", "trailing-unrelated-json"],
-)
-def test_probe_release_finds_the_payload_around_surrounding_noise(stdout: str) -> None:
-    """`_parse_selfcheck_stdout` must not stop at the first line (scanning
-    from the end) that fails to parse or isn't the selfcheck payload — a
-    version that does would misreport a genuinely healthy release as
-    `unreachable` (from Compose startup/teardown chatter) or `wrong_image`
-    (from an unrelated JSON object elsewhere in the stream), which
-    `deploy_health_check` would then auto-rollback (ADR-008) — exactly
-    the QA-2 failure class the surrounding code exists to prevent."""
-
-    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return subprocess.CompletedProcess([], 0, stdout, "")
-
-    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
-    assert result["status"] == "healthy", result
-    assert result["reported_release_id"] == "abc1234"
-
-
-def test_probe_release_detects_a_wrong_image() -> None:
-    """QA-26's underlying concern — a probe that could report healthy for
-    the wrong release — is structurally eliminated by D3: `probe_release`
-    runs the exact image under deployment and checks what it reports about
-    itself, so a stale/wrong image is caught by content, not by luck."""
-    # `release_id` (the RELEASE_ID env var probe_release injected) reads
-    # back as the requested id, same as ever — it's `image_release_id`
-    # (the build-time identity baked into the image actually running,
-    # QA-37) that disagrees, which is what `wrong_image` must catch.
-    payload = json.dumps(
-        {"release_id": "abc1234", "image_release_id": "stale999", "overall": "healthy"}
-    )
-
-    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return subprocess.CompletedProcess([], 0, payload + "\n", "")
-
-    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
-    assert result["status"] == "wrong_image"
-    assert result["reported_release_id"] == "stale999"
-
-
-def test_probe_release_reports_unhealthy_on_a_nonzero_selfcheck_exit() -> None:
-    payload = json.dumps(
-        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "unhealthy"}
-    )
-
-    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        raise ComposeError("docker compose run ... failed (exit 1): ...", stdout=payload + "\n")
-
-    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
-    assert result["status"] == "unhealthy"
-    assert result["reported_release_id"] == "abc1234"
-
-
-def test_probe_release_reports_unreachable_when_docker_itself_fails() -> None:
-    def fake_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        raise ComposeError("docker CLI not found")
-
-    result = probe_release(release_id="abc1234", run_compose_fn=fake_runner)
-    assert result["status"] == "unreachable"
-    assert result["reported_release_id"] is None

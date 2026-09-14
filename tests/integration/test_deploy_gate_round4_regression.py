@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -52,44 +53,59 @@ def _release_rows(engine) -> dict[str, str]:
         )
 
 
+def _make_release_dir(root: Path, release_id: str) -> None:
+    bin_dir = root / "releases" / release_id / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "finance").touch()
+
+
 @pytest.fixture
-def two_healthy_releases(role_engine):
+def two_healthy_releases(role_engine, tmp_path):
     """`aaaaaaa` (previous) -> `bbbbbbb` (current), with `bbbbbbb` carrying
     the `replaces_release_id` a real `start_deploy` would have recorded —
-    the ordinary state a third deploy or a rollback starts from."""
+    the ordinary state a third deploy or a rollback starts from. Also
+    builds real release directories for both under a `tmp_path` release
+    root, with `current` pointed at `bbbbbbb` (matching the bookkeeping
+    below) — ADR-019's `deploy`/`rollback` touch the filesystem between
+    health-check and bookkeeping, so a rollback that actually promotes
+    needs a real target directory to repoint `current` to."""
     engine = role_engine("finance_app")
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
         conn.execute(
             text(
                 "INSERT INTO ops.releases "
-                "(release_id, image_ref, status, health_check_status, replaces_release_id) "
+                "(release_id, artifact_ref, status, health_check_status, replaces_release_id) "
                 "VALUES ('aaaaaaa', 'img:aaaaaaa', 'previous', 'healthy', NULL), "
                 "       ('bbbbbbb', 'img:bbbbbbb', 'current', 'healthy', 'aaaaaaa')"
             )
         )
-    yield engine
+    _make_release_dir(tmp_path, "aaaaaaa")
+    _make_release_dir(tmp_path, "bbbbbbb")
+    (tmp_path / "current").symlink_to(Path("releases") / "bbbbbbb", target_is_directory=True)
+    yield engine, tmp_path
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
 
 
 def _selfcheck_stub(overall: str):  # noqa: ANN202
-    """A `run_compose` stand-in that answers a `finance selfcheck --json`
+    """A `run_release` stand-in that answers a `finance selfcheck --json`
     run with the pinned `RELEASE_ID` and the given verdict, and records
     every call so a test can prove whether it was consulted at all."""
     calls: list[tuple] = []
 
-    def fake(compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+    def fake(release_path, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
         calls.append(args)
         if "selfcheck" in args:
             reported = (env or {}).get("RELEASE_ID")
-            # `image_release_id` matches the requested id here (QA-37):
-            # this fixture stands in for a release image that genuinely
-            # *is* the one requested, so it must not read as `wrong_image`
-            # — these tests are about QA-40's runner-injection and QA-41's
-            # verify-then-promote race, not the image-identity check.
+            # `installed_release_id` matches the requested id here
+            # (QA-37): this fixture stands in for a release that
+            # genuinely *is* the one requested, so it must not read as
+            # `wrong_release` — these tests are about QA-40's
+            # runner-injection and QA-41's verify-then-promote race, not
+            # the release-identity check.
             payload = json.dumps(
-                {"release_id": reported, "image_release_id": reported, "overall": overall}
+                {"release_id": reported, "installed_release_id": reported, "overall": overall}
             )
             return subprocess.CompletedProcess(
                 list(args), 0 if overall == "healthy" else 1, payload + "\n", ""
@@ -100,20 +116,17 @@ def _selfcheck_stub(overall: str):  # noqa: ANN202
 
 
 @pytest.fixture
-def no_real_docker(monkeypatch, tmp_path):
-    """Guarantees the tests below cannot reach a real Docker daemon.
+def no_real_host_binaries(monkeypatch, tmp_path):
+    """Guarantees the tests below cannot reach a real release binary.
 
-    Not defensive padding: `_do_rollback`/`restart` bypass every injected
-    runner (QA-40 below), so on a host that *does* have Docker — every
-    GitHub-hosted runner — they otherwise shell out to `docker compose -f
-    deploy/compose.yaml --profile app run --rm -T app finance selfcheck
-    --json`, which starts the production `postgres` service and tries to
-    pull a release image, on the test host. An empty `PATH` turns that into
-    a deterministic `FileNotFoundError` instead, so these tests assert the
-    same thing, at the same speed, with or without a daemon present. The
-    existing
-    `test_deploy_gate_regression.py::test_rollback_refuses_to_promote_a_target_that_fails_its_own_selfcheck`
-    has no such guard — see QA-40.
+    Not defensive padding: `_do_rollback`/`restart` used to bypass every
+    injected runner (QA-40 below — fixed by threading `run_release_fn=
+    run_release` from `cli/finops.py`'s own call sites, mirroring what
+    `deploy` already did), so on a host with no fake in place they would
+    otherwise shell out to a real `<release>/.venv/bin/finance selfcheck
+    --json`. An empty `PATH` turns any un-injected path into a
+    deterministic `FileNotFoundError` instead, so these tests assert the
+    same thing, at the same speed, with or without a real binary present.
     """
     monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
 
@@ -124,65 +137,55 @@ def no_real_docker(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("command", [["rollback"], ["restart"]])
-def test_rollback_and_restart_use_the_injected_compose_runner(
-    two_healthy_releases, no_real_docker, monkeypatch, command: list[str]
+def test_rollback_and_restart_use_the_injected_release_runner(
+    two_healthy_releases, no_real_host_binaries, monkeypatch, command: list[str]
 ) -> None:
-    """`deploy` threads its compose runner through explicitly
-    (`deploy_health_check(..., run_compose_fn=run_compose)`), which is why
+    """`deploy` threads its release runner through explicitly
+    (`deploy_health_check(..., run_release_fn=run_release)`), which is why
     `test_finops_cli_regression.py`'s deploy tests genuinely exercise the
-    gate. `_do_rollback` and `restart` do not:
+    gate. Originally (QA-40, under the Docker model) `_do_rollback` and
+    `restart` did not — `probe_release`'s runner-injection default was
+    bound at function-definition time, so patching `cli.finops.run_compose`
+    after import never changed what those two commands executed, and the
+    non-zero exit their tests asserted on came from "docker CLI not found",
+    not from the guard under test.
 
-        health = status.probe_release(release_id=target_release_id,
-                                      compose_file=compose_file)
-
-    `probe_release`'s `run_compose_fn` default is bound to
-    `ops.compose.run_compose` at function-definition time, so neither
-    patching `cli.finops.run_compose` nor patching `ops.compose.run_compose`
-    after import changes what these two commands execute. Consequences:
-
-    * the round-2 fix for `_do_rollback` has no test that can fail — swap
-      its `unhealthy` fake for a `healthy` one and it still passes, because
-      the non-zero exit comes from "docker CLI not found";
-    * on a runner that *does* have Docker, that test really runs
-      `docker compose -f deploy/compose.yaml --profile app run --rm -T app
-      finance selfcheck --json`, which starts the production `postgres`
-      service (`depends_on: service_healthy`) and attempts to pull
-      `ghcr.io/jq712/claude-finance-app:aaaaaaa` on the test host.
-
-    Fix by passing `run_compose_fn=run_compose` from both call sites, the
-    way `deploy` already does.
-    """
+    Fixed under ADR-019 by passing `run_release_fn=run_release` from every
+    call site in `cli/finops.py`, the way `deploy` already did — this test
+    now genuinely proves that threading holds, for both commands."""
+    engine, release_root = two_healthy_releases
     fake, calls = _selfcheck_stub("healthy")
     import finance_app.cli.finops as finops_module
 
-    monkeypatch.setattr(finops_module, "run_compose", fake)
+    monkeypatch.setattr(finops_module, "run_release", fake)
 
-    runner.invoke(finops_module.app, command)
+    runner.invoke(finops_module.app, [*command, "--release-root", str(release_root)])
 
     assert calls, (
-        f"`finops {command[0]}` never called the injected compose runner — it shelled out "
-        "to the real `docker` binary, so no test of this path can distinguish a working "
-        "probe from a broken one"
+        f"`finops {command[0]}` never called the injected release runner — it shelled out "
+        "to a real binary, so no test of this path can distinguish a working probe from "
+        "a broken one"
     )
 
 
 def test_rollback_refuses_an_unhealthy_target_because_it_is_unhealthy(
-    two_healthy_releases, no_real_docker, monkeypatch
+    two_healthy_releases, no_real_host_binaries, monkeypatch
 ) -> None:
     """The assertion the round-2 test *meant* to make: the refusal must be
     attributable to the target's own selfcheck verdict, not to any failure
     of the probe to run. Pins the message the operator sees, too — "rollback
     target is not healthy: aaaaaaa: {... 'status': 'unhealthy' ...}", never
     "unreachable"."""
+    engine, release_root = two_healthy_releases
     fake, _calls = _selfcheck_stub("unhealthy")
     import finance_app.cli.finops as finops_module
 
-    monkeypatch.setattr(finops_module, "run_compose", fake)
+    monkeypatch.setattr(finops_module, "run_release", fake)
 
-    result = runner.invoke(finops_module.app, ["rollback"])
+    result = runner.invoke(finops_module.app, ["rollback", "--release-root", str(release_root)])
 
     assert result.exit_code != 0
-    assert _release_rows(two_healthy_releases)["bbbbbbb"] == "current"
+    assert _release_rows(engine)["bbbbbbb"] == "current"
     assert "'status': 'unhealthy'" in result.output.replace("\n", ""), (
         f"refusal was not attributed to the target's selfcheck verdict: {result.output!r}"
     )
@@ -221,7 +224,7 @@ def test_rollback_promotes_the_same_release_it_verified(two_healthy_releases, mo
     Resolve the target once and pass it through — `release_ops.rollback`
     should take the release id that was verified, not re-derive it.
     """
-    engine = two_healthy_releases
+    engine, release_root = two_healthy_releases
     probed: list[str] = []
 
     def probe_and_race(*, release_id: str, **_kwargs):  # noqa: ANN202
@@ -234,7 +237,7 @@ def test_rollback_promotes_the_same_release_it_verified(two_healthy_releases, mo
             conn.execute(
                 text(
                     "INSERT INTO ops.releases "
-                    "(release_id, image_ref, status, health_check_status, replaces_release_id) "
+                    "(release_id, artifact_ref, status, health_check_status, replaces_release_id) "
                     "VALUES ('ccccccc', 'img:ccccccc', 'failed', 'unhealthy', 'bbbbbbb')"
                 )
             )
@@ -243,10 +246,14 @@ def test_rollback_promotes_the_same_release_it_verified(two_healthy_releases, mo
     monkeypatch.setattr(status_module, "probe_release", probe_and_race)
     import finance_app.cli.finops as finops_module
 
-    result = runner.invoke(finops_module.app, ["rollback"])
+    result = runner.invoke(finops_module.app, ["rollback", "--release-root", str(release_root)])
 
     statuses = _release_rows(engine)
-    assert probed == ["aaaaaaa"]
+    # `_do_rollback` probes twice under ADR-019 (once by path before the
+    # symlink repoint, once through `current` after it) — both calls must
+    # still name the same target; that it's the *same* release every time,
+    # not the count, is the invariant this test is about.
+    assert probed and set(probed) == {"aaaaaaa"}
     reported = result.output.strip()
     assert statuses["aaaaaaa"] == "current", (
         f"probed {probed[0]!r} but {reported!r} while ops.releases says {statuses} — the "
@@ -289,12 +296,12 @@ def test_rollback_after_an_interrupted_deploy_does_not_skip_the_current_release(
     it treats a `failed` one — whatever is `current` is still what is
     running.
     """
-    engine = two_healthy_releases
+    engine, release_root = two_healthy_releases
     with engine.begin() as conn:
         conn.execute(
             text(
                 "INSERT INTO ops.releases "
-                "(release_id, image_ref, status, replaces_release_id) "
+                "(release_id, artifact_ref, status, replaces_release_id) "
                 "VALUES ('ccccccc', 'img:ccccccc', 'pending', 'bbbbbbb')"
             )
         )
@@ -310,7 +317,7 @@ def test_rollback_after_an_interrupted_deploy_does_not_skip_the_current_release(
     )
     import finance_app.cli.finops as finops_module
 
-    runner.invoke(finops_module.app, ["rollback"])
+    runner.invoke(finops_module.app, ["rollback", "--release-root", str(release_root)])
 
     statuses = _release_rows(engine)
     assert statuses["bbbbbbb"] != "rolled_back", (
@@ -322,21 +329,19 @@ def test_rollback_after_an_interrupted_deploy_does_not_skip_the_current_release(
 def test_deploy_leaves_no_release_pending_when_the_health_probe_raises(
     two_healthy_releases, monkeypatch
 ) -> None:
-    """`deploy` guards the pull/migrate step with `except ComposeError` and
-    marks the release `failed`, but the health-check phase that follows has
-    no guard at all. `run_compose` only converts
-    `CalledProcessError`/`TimeoutExpired`/`FileNotFoundError` into
-    `ComposeError` (see
-    `tests/unit/test_deploy_topology_round4_regression.py::
-    test_run_compose_wraps_every_subprocess_failure_as_a_compose_error`),
-    so a `PermissionError` on the Docker socket propagates straight out of
-    `finops deploy`:
+    """`deploy` guards the pull/migrate step with `except HostCommandError`
+    and marks the release `failed`, but the health-check phase that
+    follows has its own QA-42 backstop (a bare `except Exception` around
+    the `deploy_health_check` call in `cli/finops.py`) specifically
+    because `run_release` cannot guarantee every failure mode is wrapped
+    if a caller-supplied runner (as here) raises something unexpected
+    directly rather than going through the real subprocess boundary:
 
-    * the operator gets a raw traceback from the one command that is
-      supposed to be the narrow, auditable production interface;
-    * the release stays `pending`, so no auto-rollback runs even though the
-      deploy demonstrably did not succeed;
-    * and that `pending` row then mis-targets the next `finops rollback`
+    * the operator must never get a raw traceback from the one command
+      that is supposed to be the narrow, auditable production interface;
+    * the release must not stay `pending` (no auto-rollback would run
+      even though the deploy demonstrably did not succeed);
+    * and a `pending` row would mis-target the next `finops rollback`
       (test above).
 
     Whatever the failure, the release must end up `failed` — the deploy
@@ -344,16 +349,20 @@ def test_deploy_leaves_no_release_pending_when_the_health_probe_raises(
     """
     import finance_app.cli.finops as finops_module
 
-    def permission_denied(compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+    engine, release_root = two_healthy_releases
+    _make_release_dir(release_root, "c" * 7)
+    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
+
+    def permission_denied(release_path, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
         if "selfcheck" in args:
-            raise PermissionError(13, "Permission denied", "/var/run/docker.sock")
+            raise PermissionError(13, "Permission denied", "/opt/finance/releases/ccccccc")
         return subprocess.CompletedProcess(list(args), 0, "", "")
 
-    monkeypatch.setattr(finops_module, "run_compose", permission_denied)
+    monkeypatch.setattr(finops_module, "run_release", permission_denied)
 
-    runner.invoke(finops_module.app, ["deploy", "c" * 7])
+    runner.invoke(finops_module.app, ["deploy", "c" * 7, "--release-root", str(release_root)])
 
-    statuses = _release_rows(two_healthy_releases)
+    statuses = _release_rows(engine)
     assert statuses.get("ccccccc") != "pending", (
         f"deploy crashed and left the release unresolved: {statuses}"
     )

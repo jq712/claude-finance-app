@@ -17,11 +17,15 @@ hardening:
   sites in `Text`. `finops restart`, `finops rollback`, and `deploy`'s own
   `RollbackTargetUnhealthyError` handler still interpolate the probe
   payload into a Rich markup string and crash with `MarkupError`.
-* QA-45 — nothing pins the property QA-37's whole `wrong_image` fix rests
-  on: that `deploy/compose.yaml` never lets `IMAGE_RELEASE_ID` be set at
-  container-start time. Adding one line to the `app` service's
-  `environment:` silently turns the check back into the tautology QA-37
-  removed, and every existing test stays green.
+* QA-45 (Docker-era; superseded under ADR-019) — nothing pinned the
+  property QA-37's whole `wrong_image` fix rested on: that
+  `deploy/compose.yaml` never let `IMAGE_RELEASE_ID` be set at
+  container-start time. Under the bare-metal model there is no image and
+  no such variable at all — this invariant is now covered by an
+  *executable* end-to-end test in `test_deploy_topology_baremetal.py`
+  (a real `git archive` plus a real forged-`sys.argv[0]` attempt) rather
+  than a static grep, which is strictly stronger. See that file's QA-45
+  section header for the full account of what moved and why.
 * QA-46 — QA-35's leading/trailing-whitespace rejection covers space and
   tab only, while the script's own required-credential check uses
   `tr -d '[:space:]'`; a trailing form feed or vertical tab is exported
@@ -34,17 +38,15 @@ that is correct but was unpinned.
 
 No Docker, no systemd, no real credentials: the shell tests execute the
 real script under `/bin/sh` against synthetic fixtures, and the CLI tests
-drive the real Typer app with the compose runner injected.
+drive the real Typer app with the release runner injected.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
-import re
 import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -133,10 +135,10 @@ def test_wrapper_rejects_every_kind_of_edge_whitespace(tmp_path: Path, raw: byte
 _HOSTILE_SELFCHECK = json.dumps(
     {
         "release_id": "abc1234",
-        "image_release_id": "abc1234",
+        "installed_release_id": "abc1234",
         "overall": "unhealthy",
         "migrations": {"status": "drift", "applied": "aaa", "head": "bbb"},
-        # Every string in this payload comes off the release image's own
+        # Every string in this payload comes off the release binary's own
         # stdout. CLAUDE.md treats every such string as hostile; an
         # unmatched Rich closing tag is the cheapest thing to put in one.
         "detail": "merchant [/red] note",
@@ -144,7 +146,7 @@ _HOSTILE_SELFCHECK = json.dumps(
 )
 
 
-def _hostile_run_compose(_compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+def _hostile_run_release(_release_path, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
     if "selfcheck" in args:
         return subprocess.CompletedProcess(list(args), 0, _HOSTILE_SELFCHECK + "\n", "")
     return subprocess.CompletedProcess(list(args), 0, "", "")
@@ -167,7 +169,7 @@ def _patch_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     import finance_app.cli.finops as finops_module
     from finance_app.ops import release as release_ops
 
-    monkeypatch.setattr(finops_module, "run_compose", _hostile_run_compose)
+    monkeypatch.setattr(finops_module, "run_release", _hostile_run_release)
     monkeypatch.setattr(finops_module, "session_scope", _fake_session_scope)
     monkeypatch.setattr(finops_module, "observer_session_scope", _fake_session_scope)
     monkeypatch.setattr(release_ops, "get_previous", lambda _s: _FakeRow())
@@ -179,8 +181,18 @@ def _patch_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     # only needs to not crash the fake `object()` session on the way
     # there.
     monkeypatch.setattr(release_ops, "get_current", lambda _s: None)
+    # `restart` reads `status.release_topology` (a bookkeeping/symlink
+    # comparison), never `status.current_release` directly — patched here
+    # so it doesn't try to run real SQL against the fake `object()` session
+    # `_fake_session_scope` yields.
     monkeypatch.setattr(
-        finops_module.status, "current_release", lambda _s: {"release_id": "abc1234"}
+        finops_module.status,
+        "release_topology",
+        lambda _s, *, release_root: {
+            "bookkeeping_current": "abc1234",
+            "symlink_current": "abc1234",
+            "agrees": True,
+        },
     )
 
 
@@ -194,19 +206,21 @@ def test_operator_commands_survive_markup_shaped_probe_output(
     and `_emit` follows it. `restart`/`rollback` do not.
 
     The probe payload is strictly *less* trustworthy than a database row:
-    `probe_release` exists specifically to interrogate an image that has
-    not yet been trusted. An image that reports itself unhealthy *and*
+    `probe_release` exists specifically to interrogate a release that has
+    not yet been trusted. A release that reports itself unhealthy *and*
     embeds `[/red]` in any field turns the failure report into a
     `MarkupError` traceback with empty stdout — the operator is told
     nothing at the exact moment the gate fired correctly.
 
-    Reproduced against the real Typer app; only the compose runner and the
-    DB sessions are stubbed.
+    Reproduced against the real Typer app; only the release runner and the
+    DB sessions are stubbed. `--release-root` is set to something other
+    than the production default so the ADR-019 production-opt-in guard
+    doesn't refuse the command before ever reaching the mocked path.
     """
     _patch_cli(monkeypatch)
     import finance_app.cli.finops as finops_module
 
-    result = runner.invoke(finops_module.app, [command])
+    result = runner.invoke(finops_module.app, [command, "--release-root", "/tmp/qa-release-root"])
 
     assert result.exception is None or isinstance(result.exception, SystemExit), (
         f"`finops {command}` crashed on markup-shaped probe output: {result.exception!r}"
@@ -257,10 +271,21 @@ def test_deploy_prints_manual_intervention_when_the_rollback_target_is_also_unhe
     def _scope():  # noqa: ANN202
         yield _Session()
 
-    monkeypatch.setattr(finops_module, "run_compose", _hostile_run_compose)
+    monkeypatch.setattr(finops_module, "run_release", _hostile_run_release)
     monkeypatch.setattr(finops_module, "session_scope", _scope)
     monkeypatch.setattr(finops_module, "observer_session_scope", _scope)
-    monkeypatch.setattr(release_ops, "start_deploy", lambda _s, *, release_id, image_ref: deployed)
+    # `deploy`'s two pre-flight gates (ADR-019, not present under the old
+    # Docker model this test predates): confirm the release directory is
+    # installed, and confirm a successful backup is on record. Both are
+    # filesystem/DB checks this pure-mock test has no real backing for —
+    # stubbed to their "proceed" answer so the test stays focused on the
+    # markup/auto-rollback behavior below, not on building a real release
+    # tree and a real backup row.
+    monkeypatch.setattr(finops_module, "release_is_installed", lambda _root, _release_id: True)
+    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
+    monkeypatch.setattr(
+        release_ops, "start_deploy", lambda _s, *, release_id, artifact_ref: deployed
+    )
     monkeypatch.setattr(
         release_ops, "mark_failed", lambda _s, r, *, reason: setattr(r, "status", "failed")
     )
@@ -274,7 +299,9 @@ def test_deploy_prints_manual_intervention_when_the_rollback_target_is_also_unhe
     # this test actually exercises.
     monkeypatch.setattr(release_ops, "get_current", lambda _s: None)
 
-    result = runner.invoke(finops_module.app, ["deploy", "ccccccc"])
+    result = runner.invoke(
+        finops_module.app, ["deploy", "ccccccc", "--release-root", "/tmp/qa-release-root"]
+    )
 
     assert result.exception is None or isinstance(result.exception, SystemExit), (
         f"`finops deploy` crashed while reporting a failed auto-rollback: {result.exception!r}"
@@ -285,150 +312,22 @@ def test_deploy_prints_manual_intervention_when_the_rollback_target_is_also_unhe
 
 
 # ---------------------------------------------------------------------------
-# QA-45 — the property QA-37's wrong_image fix silently depends on.
+# QA-45 — the property QA-37's wrong-release fix depends on — under
+# ADR-019, this is `test_wrong_release_detection_is_not_a_tautology` and
+# `test_installed_release_root_walks_up_from_argv0_not_from_package_location`
+# in `test_deploy_topology_baremetal.py`: an *executable* end-to-end test
+# (real `git archive`, real `sys.argv[0]` forgery attempt) rather than a
+# static grep over `deploy/compose.yaml`/`Dockerfile`/`ci.yml`, which no
+# longer carry this identity at all — there is no image, no `ARG`/`ENV
+# RELEASE_ID`, no `IMAGE_RELEASE_ID`. `test_selfcheck_reports_the_baked_
+# identity_separately_from_the_injected_one` and
+# `test_the_baked_image_identity_is_wired_end_to_end_across_three_files`
+# (formerly here) are both superseded by that same file's tests — the
+# `Settings.image_release_id` field they exercised no longer exists,
+# deliberately (any `Settings` field is env-settable, i.e. forgeable by
+# the very process `probe_release` is trying to verify; see
+# `ops/identity.py`'s module docstring).
 # ---------------------------------------------------------------------------
-
-
-def _service_environment_keys(block: str) -> set[str]:
-    return set(re.findall(r"^      ([A-Z0-9_]+):", block, flags=re.MULTILINE))
-
-
-def test_no_compose_service_lets_image_release_id_be_set_at_container_start() -> None:
-    """QA-37 replaced a tautological `wrong_image` check with one that
-    compares `image_release_id` — and that is only meaningful because the
-    value is baked by `docker build` and *cannot* be supplied by whoever
-    starts the container. Docker `ENV` is overridable at run time by
-    design (`-e`, or a Compose `environment:` entry), so the single thing
-    standing between this check and being a tautology again is
-    `deploy/compose.yaml` never naming `IMAGE_RELEASE_ID`.
-
-    Nothing tested that. `test_wrong_image_detection_is_not_a_tautology`
-    (round 4) only asserts the *Dockerfile* bakes an identity; adding
-
-        IMAGE_RELEASE_ID: ${IMAGE_RELEASE_ID:-}
-
-    to the `app` service would keep every test in this repository green
-    while restoring the exact defect QA-37 was raised for — `finops
-    deploy` runs inside the `deploy` container, which carries its own
-    baked `IMAGE_RELEASE_ID` (the *previous* release's), so that variable
-    is populated and ready to be interpolated.
-
-    Asserted for every service, not just `app`: `finops restart`/`rollback`
-    probe through the same file.
-    """
-    from tests.unit.test_deploy_topology_regression import _service_blocks
-
-    compose_text = _COMPOSE_FILE.read_text()
-    offenders = {
-        name: sorted(keys)
-        for name, block in _service_blocks(compose_text).items()
-        if (keys := {k for k in _service_environment_keys(block) if "IMAGE_RELEASE_ID" in k})
-    }
-    assert not offenders, (
-        f"deploy/compose.yaml services {offenders} declare IMAGE_RELEASE_ID in their "
-        "environment, which lets the value probe_release compares be supplied by the "
-        "process starting the container — the tautology QA-37 removed"
-    )
-    # Comments are fine (documenting *why* it is absent is welcome); an
-    # interpolation is not, wherever in the file it appears.
-    executable = [line for line in compose_text.splitlines() if not line.lstrip().startswith("#")]
-    assert not [line for line in executable if "IMAGE_RELEASE_ID" in line], (
-        "deploy/compose.yaml references IMAGE_RELEASE_ID outside a comment; the build-time "
-        "identity must never be interpolated by Compose"
-    )
-
-
-def test_selfcheck_reports_the_baked_identity_separately_from_the_injected_one() -> None:
-    """`release_id` and `image_release_id` must remain two distinct fields
-    reading two distinct settings — collapsing them (e.g. defaulting
-    `image_release_id` to `release_id` when unset, which would look like a
-    harmless compatibility shim for pre-QA-37 images) restores the
-    tautology at the reporting end instead of the compose end."""
-    from finance_app.config.settings import Settings
-
-    settings = Settings(release_id="injected999", image_release_id="")
-    assert settings.image_release_id == "", (
-        "image_release_id fell back to release_id; probe_release would then be comparing "
-        "the injected RELEASE_ID against itself again"
-    )
-
-    from finance_app.ops.status import probe_release
-
-    payload: dict[str, Any] = {
-        "release_id": "abc1234",
-        "image_release_id": None,
-        "overall": "healthy",
-    }
-
-    def runner_fn(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        return subprocess.CompletedProcess([], 0, json.dumps(payload) + "\n", "")
-
-    result = probe_release(release_id="abc1234", run_compose_fn=runner_fn)
-    assert result["status"] == "wrong_image", (
-        "an image carrying no baked identity must fail closed as `wrong_image`, never be "
-        f"accepted on the strength of the echoed RELEASE_ID alone: {result}"
-    )
-
-
-def test_the_baked_image_identity_is_wired_end_to_end_across_three_files() -> None:
-    """QA-37's `wrong_image` check spans `Dockerfile` -> `.github/workflows/
-    ci.yml` -> `config/settings.py`, and no CI job executes that chain:
-    `container-build` (the only image build on a PR) runs a bare `docker
-    build` with no `--build-arg`, and neither `migration-preflight` nor
-    `staging-smoke` ever calls `probe_release`.
-
-    So a rename on any one side — `ARG RELEASE_ID` -> `ARG GIT_SHA`, or
-    `ENV IMAGE_RELEASE_ID` -> `ENV IMAGE_SHA` — publishes an image whose
-    identity reads `unknown`. BuildKit only *warns* about an unconsumed
-    build arg; `docker/build-push-action` does not fail on it. Every
-    subsequent `finops deploy` would then report `wrong_image`,
-    auto-rollback, find the rollback target reports `wrong_image` too, and
-    stop at "manual intervention required" — a total deploy outage that
-    nothing in CI would have caught.
-
-    This is the cheap mechanical substitute for the end-to-end test that
-    does not exist: the three names must agree, and the value baked must
-    be the same expression as the tag pushed.
-    """
-    dockerfile = _DOCKERFILE.read_text()
-    ci = _CI_WORKFLOW.read_text()
-
-    arg_match = re.search(r"^ARG\s+([A-Z0-9_]+)=", dockerfile, flags=re.MULTILINE)
-    assert arg_match, "the runtime stage declares no `ARG <NAME>=` for the baked identity"
-    build_arg = arg_match.group(1)
-
-    env_match = re.search(r"^ENV\s+IMAGE_RELEASE_ID=\$([A-Z0-9_]+)", dockerfile, flags=re.MULTILINE)
-    assert env_match, (
-        "the Dockerfile does not set `ENV IMAGE_RELEASE_ID=$<ARG>`; `Settings.image_release_id` "
-        "reads the IMAGE_RELEASE_ID environment variable and nothing else"
-    )
-    assert env_match.group(1) == build_arg, (
-        f"`ENV IMAGE_RELEASE_ID=${env_match.group(1)}` does not reference the declared "
-        f"`ARG {build_arg}` — the baked identity would always be empty"
-    )
-
-    from finance_app.config.settings import Settings
-
-    assert "image_release_id" in Settings.model_fields, (
-        "Settings no longer exposes `image_release_id`, so nothing reads the baked ENV"
-    )
-
-    publish = ci[ci.index("publish-image:") :]
-    publish = publish[: publish.index("\n  migration-preflight:")]
-    assert re.search(rf"^\s+{build_arg}=\$\{{\{{ github\.sha \}}\}}\s*$", publish, re.MULTILINE), (
-        f"ci.yml's publish-image step does not pass `{build_arg}=${{{{ github.sha }}}}` as a "
-        "build-arg, so every published image bakes the ARG's default and `probe_release` "
-        "reports `wrong_image` for every deploy"
-    )
-    assert re.search(
-        r"^\s+ghcr\.io/\$\{\{ github\.repository \}\}:\$\{\{ github\.sha \}\}\s*$",
-        publish,
-        re.MULTILINE,
-    ), (
-        "the image is not tagged with the same `github.sha` that is baked into it as the "
-        "build-time identity; probe_release compares the requested tag against the baked "
-        "value, so the two must be the same expression"
-    )
 
 
 def test_deploy_reports_an_invalid_release_id_instead_of_crashing_on_it() -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -26,10 +27,10 @@ from finance_app.cli.finops import app
 pytestmark = pytest.mark.integration
 
 
-def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
-    compose_file, *args, env=None, **kwargs
+def _healthy_selfcheck_run_release(  # noqa: ANN001, ANN002, ANN003, ARG001
+    release_path, *args, env=None, **kwargs
 ):
-    """Stands in for `ops.compose.run_compose`: every call succeeds, and a
+    """Stands in for `ops.host.run_release`: every call succeeds, and a
     `finance selfcheck --json` run (ADR-016 D3 — `ops.status.probe_release`)
     reports the pinned `RELEASE_ID` as healthy, so tests using this fake
     exercise a deploy whose *release* is fine and are free to focus on
@@ -37,10 +38,16 @@ def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
     if "selfcheck" in args:
         reported = (env or {}).get("RELEASE_ID")
         payload = json.dumps(
-            {"release_id": reported, "image_release_id": reported, "overall": "healthy"}
+            {"release_id": reported, "installed_release_id": reported, "overall": "healthy"}
         )
         return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
     return subprocess.CompletedProcess(list(args), 0, "", "")
+
+
+def _make_release_dir(root: Path, release_id: str) -> None:
+    bin_dir = root / "releases" / release_id / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "finance").touch()
 
 
 runner = CliRunner()
@@ -98,9 +105,11 @@ def test_recent_errors_rejects_an_out_of_range_limit(limit: str) -> None:
 
 
 @pytest.fixture
-def stale_sync_and_two_good_releases(role_engine):
+def stale_sync_and_two_good_releases(role_engine, tmp_path):
     """A 48h-old successful sync (Plaid outage / item re-auth pending) plus
-    a healthy A -> B release history, as `finops deploy` would find it."""
+    a healthy A -> B release history, as `finops deploy` would find it.
+    Also a real release directory for the incoming deploy under a
+    `tmp_path` release root (ADR-019) and `current` pointed at `bbbbbbb`."""
     import datetime
 
     engine = role_engine("finance_app")
@@ -126,12 +135,16 @@ def stale_sync_and_two_good_releases(role_engine):
             conn.execute(
                 text(
                     "INSERT INTO ops.releases "
-                    "(release_id, image_ref, status, health_check_status) "
+                    "(release_id, artifact_ref, status, health_check_status) "
                     "VALUES (:r, :img, :s, 'healthy')"
                 ),
                 {"r": release_id, "img": f"img:{release_id}", "s": st},
             )
-    yield engine
+    _make_release_dir(tmp_path, "a" * 7)
+    _make_release_dir(tmp_path, "b" * 7)
+    _make_release_dir(tmp_path, "c" * 7)
+    (tmp_path / "current").symlink_to(Path("releases") / ("b" * 7), target_is_directory=True)
+    yield engine, tmp_path
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
         conn.execute(text("DELETE FROM ops.sync_runs"))
@@ -143,11 +156,12 @@ def test_a_pre_existing_stale_sync_does_not_auto_roll_back_an_unrelated_deploy(
 ) -> None:
     import finance_app.cli.finops as finops_module
 
-    monkeypatch.setattr(finops_module, "run_compose", _healthy_selfcheck_run_compose)
+    engine, release_root = stale_sync_and_two_good_releases
+    monkeypatch.setattr(finops_module, "run_release", _healthy_selfcheck_run_release)
+    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
 
-    result = runner.invoke(app, ["deploy", "c" * 7])
+    result = runner.invoke(app, ["deploy", "c" * 7, "--release-root", str(release_root)])
 
-    engine = stale_sync_and_two_good_releases
     with engine.begin() as conn:
         statuses = dict(
             conn.execute(text("SELECT release_id, status FROM ops.releases")).all()  # type: ignore[arg-type]

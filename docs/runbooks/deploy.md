@@ -50,7 +50,9 @@ A particularly sensitive value (the Plaid access token, the backup encryption ke
 5. Run the migration: `alembic upgrade head` from the new release directory, using `/opt/finance/.env`'s `ALEMBIC_DATABASE_URL`.
 6. Point `current` at the new release: `sudo -u finance-prod ln -sfn /opt/finance/releases/<sha> /opt/finance/current`.
 7. `sudo systemctl enable --now` the production units and timers (names TBD by the follow-up session's unit files — analogous to the old `finance-app.service`/`finance-sync.timer`/`finance-backup.timer`/`finance-health.timer`/`finance-restore-drill.timer`, now invoking `/opt/finance/current/.venv/bin/finance`/`finops` directly instead of `docker compose run`).
-8. Verify: `finops health` / `finops version`, run as `finance-prod` (or via whatever wrapper the follow-up session provides) against `/opt/finance/.env`.
+8. Verify: `finops health` / `finops version`, run as `finance-prod` against `/opt/finance/.env`.
+
+Steps 4–7 (backup gate, migration, symlink repoint, restart) are exactly what `FINANCE_ENV_FILE=/opt/finance/.env finops deploy <sha> --release-root /opt/finance` now automates, once steps 1–3 have put a real release directory in place and a successful backup is on record — `finops deploy` refuses rather than proceeding if either is missing. The manual sequence above is what it does internally, and remains the reference for diagnosing a failure or running the steps by hand.
 
 ## 4. Normal release (every subsequent deploy)
 
@@ -58,22 +60,22 @@ Repeat steps 2–8 of §3 for the new SHA. The `current` repoint (step 6) plus a
 
 ## 5. Rollback
 
-Repoint `current` at the previous release directory and restart:
+`finops rollback --release-root /opt/finance` now automates this end to end, as `finance-prod`: it probes the previous release directory by path, refuses (no bookkeeping or symlink change) if that probe fails, then atomically repoints `current`, restarts, and re-probes through `current` — the same health-check-before-promoting discipline `probe_release` provided under the Docker design, carried forward. The manual sequence it replaces, for reference or if `finops` itself is unavailable:
 
 ```
 sudo -u finance-prod ln -sfn /opt/finance/releases/<previous-sha> /opt/finance/current
 sudo systemctl restart <production units>
 ```
 
-ADR-008's principle, carried into ADR-019: exactly one rollback step is guaranteed trivial, and it's simpler here than under the Docker design — no registry fetch at all, since the previous release's files are already on disk in `/opt/finance/releases/`. If there is no previous release directory (this was the very first deploy), there is nothing to roll back to; fix forward instead. `finops rollback` should eventually automate this symlink-and-restart sequence with the same health-check-before-promoting discipline `probe_release` provided under the Docker design (follow-up implementation).
+ADR-008's principle, carried into ADR-019: exactly one rollback step is guaranteed trivial, and it's simpler here than under the Docker design — no registry fetch at all, since the previous release's files are already on disk in `/opt/finance/releases/`. If there is no previous release directory (this was the very first deploy), there is nothing to roll back to; fix forward instead.
 
 ## 6. Restart (no release change)
+
+`finops restart --release-root /opt/finance` re-runs the release's own selfcheck through the `current` symlink and reports whether it's still healthy — it also refuses if `ops.releases` bookkeeping disagrees with what `current` actually resolves to on disk, a disagreement only possible under the symlink model. Never changes `current` or bookkeeping. Manual equivalent, for reference:
 
 ```
 sudo systemctl restart <production units>
 ```
-
-Re-confirms the currently-`current` release is healthy without changing what's deployed. `finops restart` should wrap this with a selfcheck, same as before, once implemented.
 
 ## 7. Credential rotation
 

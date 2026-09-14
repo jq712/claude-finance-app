@@ -36,29 +36,44 @@ pytestmark = pytest.mark.integration
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _healthy_selfcheck_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
-    compose_file, *args, env=None, **kwargs
+def _healthy_selfcheck_run_release(  # noqa: ANN001, ANN002, ANN003, ARG001
+    release_path, *args, env=None, **kwargs
 ):
-    """Stands in for `run_compose`: every call succeeds, and a `finance
+    """Stands in for `run_release`: every call succeeds, and a `finance
     selfcheck --json` run (ADR-016 D3 — `ops.status.probe_release`)
     reports the pinned `RELEASE_ID` as healthy — see the identical helper
     in tests/integration/test_finops_cli_regression.py."""
     if "selfcheck" in args:
         reported = (env or {}).get("RELEASE_ID")
         payload = json.dumps(
-            {"release_id": reported, "image_release_id": reported, "overall": "healthy"}
+            {"release_id": reported, "installed_release_id": reported, "overall": "healthy"}
         )
         return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
     return subprocess.CompletedProcess(list(args), 0, "", "")
+
+
+def _make_release_dir(root: Path, release_id: str) -> None:
+    """A real (empty of a real binary — every test here mocks
+    `run_release`, so nothing actually executes `.venv/bin/finance`)
+    release directory, real enough for `release_is_installed`/
+    `repoint_current`'s filesystem checks (ADR-019) to pass naturally
+    rather than needing to be mocked away too."""
+    bin_dir = root / "releases" / release_id / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "finance").touch()
 
 
 runner = CliRunner()
 
 
 @pytest.fixture
-def two_healthy_releases(role_engine):
+def two_healthy_releases(role_engine, tmp_path):
     """`aaaaaaa` (previous) -> `bbbbbbb` (current), the ordinary state a
-    third deploy starts from."""
+    third deploy starts from. Also builds real release directories for
+    both under a `tmp_path` release root (and points `current` at
+    `bbbbbbb`, matching the bookkeeping below) — ADR-019's `deploy`/
+    `rollback` touch the filesystem between health-check and bookkeeping,
+    so these need to be real, not just DB rows."""
     engine = role_engine("finance_app")
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
@@ -66,12 +81,15 @@ def two_healthy_releases(role_engine):
             conn.execute(
                 text(
                     "INSERT INTO ops.releases "
-                    "(release_id, image_ref, status, health_check_status) "
+                    "(release_id, artifact_ref, status, health_check_status) "
                     "VALUES (:r, :i, :s, 'healthy')"
                 ),
                 {"r": release_id, "i": f"img:{release_id}", "s": release_status},
             )
-    yield engine
+    _make_release_dir(tmp_path, "a" * 7)
+    _make_release_dir(tmp_path, "b" * 7)
+    (tmp_path / "current").symlink_to(Path("releases") / ("b" * 7), target_is_directory=True)
+    yield engine, tmp_path
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
 
@@ -111,7 +129,10 @@ def test_deploy_reports_failure_when_the_promotion_lock_is_contended(
 
     import finance_app.cli.finops as finops_module
 
-    monkeypatch.setattr(finops_module, "run_compose", _healthy_selfcheck_run_compose)
+    engine, release_root = two_healthy_releases
+    _make_release_dir(release_root, "c" * 7)
+    monkeypatch.setattr(finops_module, "run_release", _healthy_selfcheck_run_release)
+    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
 
     # A concurrent `finops deploy` on the same host holds the promotion
     # lock. Released explicitly and the engine disposed in `finally`: a
@@ -127,14 +148,15 @@ def test_deploy_reports_failure_when_the_promotion_lock_is_contended(
         holder.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _DEPLOY_PROMOTION_LOCK_KEY})
         holder.commit()
 
-        result = runner.invoke(finops_module.app, ["deploy", "c" * 7])
+        result = runner.invoke(
+            finops_module.app, ["deploy", "c" * 7, "--release-root", str(release_root)]
+        )
     finally:
         holder.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _DEPLOY_PROMOTION_LOCK_KEY})
         holder.commit()
         holder.close()
         engine_holding_lock.dispose()
 
-    engine = two_healthy_releases
     with engine.begin() as conn:
         statuses = dict(
             conn.execute(text("SELECT release_id, status FROM ops.releases")).all()  # type: ignore[arg-type]
@@ -176,11 +198,11 @@ def test_deploy_health_check_does_not_depend_on_the_process_working_directory(
     assert not (tmp_path / "alembic.ini").exists()
 
     payload = json.dumps(
-        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
+        {"release_id": "abc1234", "installed_release_id": "abc1234", "overall": "healthy"}
     )
 
-    def fake_run_compose(  # noqa: ANN001, ANN002, ANN003, ARG001
-        compose_file, *args, env=None, **kwargs
+    def fake_run_release(  # noqa: ANN001, ANN002, ANN003, ARG001
+        release_path, *args, env=None, **kwargs
     ):
         return subprocess.CompletedProcess(list(args), 0, payload + "\n", "")
 
@@ -188,7 +210,7 @@ def test_deploy_health_check_does_not_depend_on_the_process_working_directory(
         health = status.deploy_health_check(
             session,
             release_id="abc1234",
-            run_compose_fn=fake_run_compose,
+            run_release_fn=fake_run_release,
         )
 
     assert health["overall"] == "healthy", (
@@ -209,20 +231,21 @@ def test_rollback_refuses_to_promote_a_target_that_fails_its_own_selfcheck(
     that fails."""
     import finance_app.cli.finops as finops_module
 
-    def unhealthy_run_compose(compose_file, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+    engine, release_root = two_healthy_releases
+
+    def unhealthy_run_release(release_path, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
         if "selfcheck" in args:
             reported = (env or {}).get("RELEASE_ID")
             payload = json.dumps(
-                {"release_id": reported, "image_release_id": reported, "overall": "unhealthy"}
+                {"release_id": reported, "installed_release_id": reported, "overall": "unhealthy"}
             )
             return subprocess.CompletedProcess(list(args), 1, payload + "\n", "")
         return subprocess.CompletedProcess(list(args), 0, "", "")
 
-    monkeypatch.setattr(finops_module, "run_compose", unhealthy_run_compose)
+    monkeypatch.setattr(finops_module, "run_release", unhealthy_run_release)
 
-    result = runner.invoke(finops_module.app, ["rollback"])
+    result = runner.invoke(finops_module.app, ["rollback", "--release-root", str(release_root)])
 
-    engine = two_healthy_releases
     with engine.begin() as conn:
         statuses = dict(
             conn.execute(text("SELECT release_id, status FROM ops.releases")).all()  # type: ignore[arg-type]

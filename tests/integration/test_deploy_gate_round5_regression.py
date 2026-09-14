@@ -28,6 +28,7 @@ never the test.
 from __future__ import annotations
 
 import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -55,8 +56,14 @@ def _healthy_probe(*, release_id: str, **_kwargs):  # noqa: ANN202
     return {"status": "healthy", "reported_release_id": release_id, "detail": {}}
 
 
+def _make_release_dir(root: Path, release_id: str) -> None:
+    bin_dir = root / "releases" / release_id / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "finance").touch()
+
+
 @pytest.fixture
-def deploy_in_flight(role_engine):  # noqa: ANN001, ANN201
+def deploy_in_flight(role_engine, tmp_path):  # noqa: ANN001, ANN201
     """`aaaaaaa` (previous) -> `bbbbbbb` (current), plus `ccccccc` left
     `pending` by a `finops deploy` that is *still running* — one minute
     old, well inside `_STALE_PENDING_DEPLOY_MINUTES`, so it is a live
@@ -64,7 +71,12 @@ def deploy_in_flight(role_engine):  # noqa: ANN001, ANN201
 
     `deployed_at` is pinned explicitly so `get_previous`'s
     `ORDER BY deployed_at DESC, id DESC` resolves deterministically
-    regardless of how the rows were inserted."""
+    regardless of how the rows were inserted. Also builds real release
+    directories for all three under a `tmp_path` release root, with
+    `current` pointed at `bbbbbbb` — `_do_rollback` repoints `current` for
+    real between its probe and its bookkeeping write under ADR-019, even
+    on the paths these tests exercise where that write is ultimately
+    refused (QA-47/QA-48)."""
     engine = role_engine("finance_app")
     now = datetime.datetime.now(datetime.UTC)
     with engine.begin() as conn:
@@ -72,7 +84,7 @@ def deploy_in_flight(role_engine):  # noqa: ANN001, ANN201
         conn.execute(
             text(
                 "INSERT INTO ops.releases "
-                "(release_id, image_ref, status, health_check_status, replaces_release_id, "
+                "(release_id, artifact_ref, status, health_check_status, replaces_release_id, "
                 " deployed_at) VALUES "
                 "('aaaaaaa', 'img:aaaaaaa', 'previous', 'healthy', NULL, :t0), "
                 "('bbbbbbb', 'img:bbbbbbb', 'current', 'healthy', 'aaaaaaa', :t1), "
@@ -84,7 +96,10 @@ def deploy_in_flight(role_engine):  # noqa: ANN001, ANN201
                 "t2": now - datetime.timedelta(minutes=1),
             },
         )
-    yield engine
+    for release_id in ("aaaaaaa", "bbbbbbb", "ccccccc"):
+        _make_release_dir(tmp_path, release_id)
+    (tmp_path / "current").symlink_to(Path("releases") / "bbbbbbb", target_is_directory=True)
+    yield engine, tmp_path
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
 
@@ -132,7 +147,7 @@ def test_rollback_does_not_demote_a_release_promoted_during_its_probe_window(
     `status = 'current'` — takes no lock at all, so the guard has a hole
     exactly the shape of this test.
     """
-    engine = deploy_in_flight
+    engine, release_root = deploy_in_flight
 
     def probe_and_let_the_deploy_land(*, release_id: str, **_kwargs):  # noqa: ANN202
         with Session(engine) as session:
@@ -148,7 +163,7 @@ def test_rollback_does_not_demote_a_release_promoted_during_its_probe_window(
     monkeypatch.setattr(status_module, "probe_release", probe_and_let_the_deploy_land)
     import finance_app.cli.finops as finops_module
 
-    result = runner.invoke(finops_module.app, ["rollback"])
+    result = runner.invoke(finops_module.app, ["rollback", "--release-root", str(release_root)])
 
     statuses = _rows(engine)
     assert statuses["ccccccc"] != "rolled_back", (
@@ -168,8 +183,11 @@ def test_rollback_respects_the_deploy_promotion_advisory_lock(deploy_in_flight) 
     mutual exclusion.
 
     Deterministic, no timing: a separate session takes the lock in an open
-    transaction, then `rollback` is called. It must not promote."""
-    engine = deploy_in_flight
+    transaction, then `rollback` is called. It must not promote. Calls
+    `release_ops.rollback` directly, bypassing the CLI and every
+    filesystem operation `_do_rollback` adds under ADR-019 — this test is
+    about the database-level lock, not the symlink."""
+    engine, _release_root = deploy_in_flight
     with Session(engine) as holder, Session(engine) as actor:
         holder.execute(
             text("SELECT pg_advisory_xact_lock(:key)"),
@@ -210,9 +228,11 @@ def test_rollback_respects_the_deploy_promotion_advisory_lock(deploy_in_flight) 
 
 
 @pytest.fixture
-def failed_latest_deploy(role_engine):  # noqa: ANN001, ANN201
+def failed_latest_deploy(role_engine, tmp_path):  # noqa: ANN001, ANN201
     """The designed QA-2 state: a deploy just failed, so `current` is
-    still the release that is actually running."""
+    still the release that is actually running. Real release directories
+    for all three, `current` already pointing at `bbbbbbb` — matching
+    what a rollback resolving to the no-op case should find on disk too."""
     engine = role_engine("finance_app")
     now = datetime.datetime.now(datetime.UTC)
     with engine.begin() as conn:
@@ -220,7 +240,7 @@ def failed_latest_deploy(role_engine):  # noqa: ANN001, ANN201
         conn.execute(
             text(
                 "INSERT INTO ops.releases "
-                "(release_id, image_ref, status, health_check_status, replaces_release_id, "
+                "(release_id, artifact_ref, status, health_check_status, replaces_release_id, "
                 " deployed_at) VALUES "
                 "('aaaaaaa', 'img:aaaaaaa', 'previous', 'healthy', NULL, :t0), "
                 "('bbbbbbb', 'img:bbbbbbb', 'current', 'healthy', 'aaaaaaa', :t1), "
@@ -232,7 +252,10 @@ def failed_latest_deploy(role_engine):  # noqa: ANN001, ANN201
                 "t2": now - datetime.timedelta(minutes=1),
             },
         )
-    yield engine
+    for release_id in ("aaaaaaa", "bbbbbbb", "ccccccc"):
+        _make_release_dir(tmp_path, release_id)
+    (tmp_path / "current").symlink_to(Path("releases") / "bbbbbbb", target_is_directory=True)
+    yield engine, tmp_path
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
 
@@ -256,12 +279,12 @@ def test_rollback_does_not_claim_success_when_it_changed_nothing(
     explicitly ("bbbbbbb is already current; nothing to roll back") or
     exit non-zero — do not let the two outcomes be indistinguishable.
     """
-    engine = failed_latest_deploy
+    engine, release_root = failed_latest_deploy
     before = _rows(engine)
     monkeypatch.setattr(status_module, "probe_release", _healthy_probe)
     import finance_app.cli.finops as finops_module
 
-    result = runner.invoke(finops_module.app, ["rollback"])
+    result = runner.invoke(finops_module.app, ["rollback", "--release-root", str(release_root)])
 
     after = _rows(engine)
     assert before == after, "precondition: this branch is expected to change no bookkeeping"

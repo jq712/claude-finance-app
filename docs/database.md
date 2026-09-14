@@ -31,7 +31,7 @@ Created by `migrations/versions/0002_..._roles_and_grants.py`. `finance_migrator
 
 Migration `0004` (Milestone 7) adds `ops.backup_runs`/`ops.releases` (inheriting `0002`'s default-privilege grants automatically) plus three grants outside that pattern, each documented in the migration's own docstring: `finance_backup`/`finance_observer` SELECT on `public.alembic_version` (Alembic's own bookkeeping table lives outside the five application schemas), `finance_observer` SELECT on `plaid.items`/`plaid.sync_state` (narrow, status-only — deliberately not `plaid.accounts`/`plaid.transactions`), and `finance_backup` SELECT on every sequence in every application schema (`pg_dump` reads a table's owning sequence and aborts the whole dump without it — a real failure hit while building the backup script, not a hypothetical one).
 
-Passwords resolve from `<ROLE>_DB_PASSWORD` environment variables, falling back to the `devpassword` literal already used for the dev/test container. That default is synthetic and disposable, never a production credential — production role passwords are provisioned out of band as systemd encrypted credentials (`docs/security-model.md` invariant 4) and are never read from this repository.
+Passwords resolve from `<ROLE>_DB_PASSWORD` environment variables, falling back to the `devpassword` literal already used for the host dev PostgreSQL instance (and CI's own Postgres service container). That default is synthetic and disposable, never a production credential — production role passwords are provisioned out of band as systemd encrypted credentials (`docs/security-model.md` invariant 4) and are never read from this repository.
 
 ## Connections
 

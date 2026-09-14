@@ -14,18 +14,17 @@ several of the tests written to cover them are structurally unable to fail:
   time" corruption the CR check exists to prevent.
 * `_parse_selfcheck_stdout` requiring both sentinel keys only closes the
   false-*negative* direction (healthy release misread as broken). The
-  false-*positive* direction is still open: the *last* line carrying both
-  keys wins, so any later lookalike object overrides the real payload, and
-  two disagreeing candidates are resolved silently by position.
-* `probe_release`'s `wrong_image` verdict is a tautology as deployed:
-  `finance selfcheck` reports `settings.release_id`, which is read from the
-  `RELEASE_ID` environment variable `probe_release` itself injects. Nothing
-  in the image carries a build-time identity for it to disagree with.
-* `run_compose` converts `CalledProcessError`/`TimeoutExpired`/
-  `FileNotFoundError` into `ComposeError`; every other `OSError` (and the
-  `UnicodeDecodeError` a release image printing one non-UTF-8 byte
-  produces) escapes as-is, past every `except ComposeError` in the deploy
-  path.
+  false-*positive* direction — moved to `test_deploy_topology_baremetal.py`
+  under ADR-019, since it's unrelated to this file's remaining Docker
+  Compose subject matter — is still open there too: the *last* line
+  carrying both keys wins, so any later lookalike object overrides the
+  real payload.
+* `probe_release`'s wrong-release verdict was a tautology as originally
+  deployed (also moved: `test_wrong_image_detection_is_not_a_tautology`,
+  now rewritten under a new name in `test_deploy_topology_baremetal.py`
+  to exercise the fix rather than restate the defect).
+* the release-runner error funnel (`ops/compose.py`'s `run_compose`
+  originally; `ops/host.py`'s `run_release` under ADR-019 — also moved).
 * `restore-verify.sh` cleans up on `INT`/`TERM` — and then keeps running,
   having just deleted its own scratch container and password file.
 
@@ -51,8 +50,7 @@ from pathlib import Path
 
 import pytest
 
-from finance_app.ops.compose import ComposeError, run_compose
-from finance_app.ops.status import _parse_selfcheck_stdout, probe_release
+from finance_app.ops.status import _parse_selfcheck_stdout
 from tests.unit.test_deploy_topology_regression import (
     _CREDENTIAL_FILES,
     _JOB_TO_SERVICE,
@@ -313,63 +311,6 @@ def _runner_returning(stdout: str):  # noqa: ANN202
     return fake_runner
 
 
-@pytest.mark.parametrize(
-    "stdout",
-    [
-        _UNHEALTHY_PAYLOAD + "\n" + _HEALTHY_LOOKALIKE + "\n",
-        _UNHEALTHY_PAYLOAD + "\n" + json.dumps({"release_id": "abc1234", "overall": "healthy"}),
-    ],
-    ids=["log-shaped-lookalike", "bare-lookalike"],
-)
-def test_probe_release_does_not_let_a_later_lookalike_override_the_real_payload(
-    stdout: str,
-) -> None:
-    """Round 2 tightened this function to require both `release_id` and
-    `overall` before accepting a line, which stops Compose chatter and
-    unrelated JSON from being *mistaken* for the payload — the
-    false-negative direction (a healthy release reported `unreachable`/
-    `wrong_image`, then auto-rolled back).
-
-    The false-positive direction is untouched and strictly worse: the scan
-    still returns the *last* matching line, so anything later in the stream
-    that happens to carry both keys silently wins over the selfcheck's own
-    output. `configure_logging` already installs a JSON `StreamHandler` on
-    **stdout** (`ops/logging.py`), and the `app` service runs with
-    `LOG_FORMAT: json`, so the release image's own log stream is on the
-    same file descriptor as the payload this parser trusts — the docstring
-    treats that as hypothetical ("once `configure_logging` is ever wired to
-    stdout"); it is already true.
-
-    Every string in that stream is attacker-influenceable per CLAUDE.md
-    (Plaid merchant text, model responses, `ops.errors.message`). A
-    deterministic gate must not resolve "which of these is the real
-    payload" by position. The selfcheck payload is the process's own final
-    stdout write: accept only a candidate that is unambiguous, or fail
-    closed."""
-    result = probe_release(release_id="abc1234", run_compose_fn=_runner_returning(stdout))
-    assert result["status"] != "healthy", (
-        f"a lookalike JSON line overrode an `overall: unhealthy` payload: {result}"
-    )
-
-
-def test_probe_release_fails_closed_when_two_candidate_payloads_disagree() -> None:
-    """Same root cause, stated as the invariant that matters: if the stream
-    contains more than one thing claiming to be the selfcheck payload and
-    they do not agree, the deploy gate has no basis for picking one and
-    must fail closed."""
-    healthy = json.dumps(
-        {"release_id": "abc1234", "image_release_id": "abc1234", "overall": "healthy"}
-    )
-    both_orders = [f"{healthy}\n{_UNHEALTHY_PAYLOAD}\n", f"{_UNHEALTHY_PAYLOAD}\n{healthy}\n"]
-    verdicts = {
-        probe_release(release_id="abc1234", run_compose_fn=_runner_returning(s))["status"]
-        for s in both_orders
-    }
-    assert verdicts == {"unhealthy"}, (
-        f"the verdict depends on which conflicting payload came last: {verdicts}"
-    )
-
-
 def test_parse_selfcheck_stdout_still_rejects_non_payload_shapes() -> None:
     """Guards the half of the round-2 fix that does hold, so a future
     rewrite addressing the two xfails above cannot regress it."""
@@ -385,105 +326,6 @@ def test_parse_selfcheck_stdout_still_rejects_non_payload_shapes() -> None:
         _parse_selfcheck_stdout('Container x Created{"release_id": "a", "overall": "healthy"}')
         is None
     )
-
-
-def test_probe_release_never_reports_healthy_from_a_failed_compose_run() -> None:
-    """The `ComposeError` branch must never produce `healthy`, whatever the
-    salvaged stdout says — a selfcheck process that exited non-zero is not
-    a healthy release even if some line on its stdout claims otherwise."""
-    payload = json.dumps({"release_id": "abc1234", "overall": "healthy"})
-
-    def failing(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        raise ComposeError("exit 1", stdout=payload + "\n")
-
-    assert probe_release(release_id="abc1234", run_compose_fn=failing)["status"] != "healthy"
-
-
-def test_wrong_image_detection_is_not_a_tautology() -> None:
-    """`probe_release`'s docstring claims `wrong_image` catches "the image
-    that actually ran reports a `release_id` other than the one requested
-    … a failure mode no `exec`-based probe could ever detect". In the
-    deployed topology it cannot detect anything:
-
-    * `probe_release` runs compose with `env={"RELEASE_ID": release_id}`;
-    * `deploy/compose.yaml`'s `app` service sets `RELEASE_ID: ${RELEASE_ID:-}`
-      in the container environment;
-    * `Settings.release_id` is that environment variable
-      (`config/settings.py`), and `ops/selfcheck.py` reports
-      `settings.release_id` verbatim.
-
-    So the value compared is the value injected. If the registry tag were
-    reused, or a stale local image with the same tag were run, or the pull
-    silently no-op'd, the container would still echo back the requested
-    SHA and report `healthy`. Nothing in the image carries a build-time
-    identity — the Dockerfile has no `ARG`/`ENV RELEASE_ID` and CI bakes
-    no build metadata.
-
-    For this check to mean anything, the release identity `selfcheck`
-    reports must originate in the *image* (a build arg baked at `docker
-    build` time, or an image label read back), not in the environment the
-    prober supplies.
-    """
-    dockerfile = _DOCKERFILE.read_text()
-    bakes_release_identity = re.search(
-        r"^(ARG|ENV)\s+RELEASE_ID", dockerfile, flags=re.MULTILINE
-    ) or re.search(r"^LABEL\b.*revision", dockerfile, flags=re.MULTILINE)
-    app_block = _service_blocks(_COMPOSE_FILE.read_text())["app"]
-    injects_release_id = re.search(
-        r"^      RELEASE_ID: \$\{RELEASE_ID", app_block, flags=re.MULTILINE
-    )
-    assert bakes_release_identity or not injects_release_id, (
-        "probe_release compares the release id it injected via RELEASE_ID against the "
-        "release id the container reads back out of that same variable — `wrong_image` "
-        "can never fire. Bake a build-time identity into the image (ARG/ENV RELEASE_ID "
-        "or an OCI revision label) and have `finance selfcheck` report that instead."
-    )
-
-
-# ---------------------------------------------------------------------------
-# run_compose error coverage — what escapes the deploy path's `except`.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "raised",
-    [
-        PermissionError(13, "Permission denied", "docker"),
-        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
-        OSError(12, "Cannot allocate memory"),
-    ],
-    ids=["permission-denied", "invalid-utf8-on-stdout", "fork-failure"],
-)
-def test_run_compose_wraps_every_subprocess_failure_as_a_compose_error(
-    raised: Exception,
-) -> None:
-    r"""`ops/compose.py` documents itself as the single boundary that turns
-    a `docker compose` failure into `ComposeError`, and every caller in
-    `cli/finops.py` and `ops/status.py` is written to that contract
-    (`probe_release` catches only `ComposeError`; `deploy` catches only
-    `ComposeError`).
-
-    Three realistic failures break it:
-
-    * `PermissionError` — the docker binary or socket is not accessible;
-    * `UnicodeDecodeError` — `subprocess.run(text=True)` decodes strictly,
-      so *one* non-UTF-8 byte anywhere on the release image's stdout
-      (`/bin/sh -c "printf 'x\377y'"` reproduces it) raises instead of
-      returning;
-    * a bare `OSError` from `fork`/`posix_spawn`.
-
-    Each escapes as-is, past `probe_release`'s handler and past `deploy`'s,
-    aborting `finops deploy` with a raw traceback *after* the migration
-    preflight has already run — see
-    `tests/integration/test_deploy_gate_round4_regression.py` for what that
-    leaves in `ops.releases`.
-    """
-
-    def exploding_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        raise raised
-
-    with pytest.raises(ComposeError):
-        run_compose("deploy/compose.yaml", "ps", runner=exploding_runner)
 
 
 # ---------------------------------------------------------------------------

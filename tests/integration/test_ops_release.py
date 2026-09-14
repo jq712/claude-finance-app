@@ -30,7 +30,7 @@ def db_session(role_engine):
 
 
 def test_first_deploy_has_no_previous_release(db_session: Session) -> None:
-    release = release_ops.start_deploy(db_session, release_id="a" * 40, image_ref="img:a" * 8)
+    release = release_ops.start_deploy(db_session, release_id="a" * 40, artifact_ref="img:a" * 8)
     release_ops.mark_healthy(db_session, release)
     db_session.flush()
 
@@ -39,11 +39,11 @@ def test_first_deploy_has_no_previous_release(db_session: Session) -> None:
 
 
 def test_second_healthy_deploy_demotes_current_to_previous(db_session: Session) -> None:
-    first = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
+    first = release_ops.start_deploy(db_session, release_id="1" * 40, artifact_ref="img:1")
     release_ops.mark_healthy(db_session, first)
     db_session.flush()
 
-    second = release_ops.start_deploy(db_session, release_id="2" * 40, image_ref="img:2")
+    second = release_ops.start_deploy(db_session, release_id="2" * 40, artifact_ref="img:2")
     release_ops.mark_healthy(db_session, second)
     db_session.flush()
 
@@ -52,11 +52,11 @@ def test_second_healthy_deploy_demotes_current_to_previous(db_session: Session) 
 
 
 def test_failed_deploy_does_not_disturb_current_or_previous(db_session: Session) -> None:
-    first = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
+    first = release_ops.start_deploy(db_session, release_id="1" * 40, artifact_ref="img:1")
     release_ops.mark_healthy(db_session, first)
     db_session.flush()
 
-    bad = release_ops.start_deploy(db_session, release_id="b" * 40, image_ref="img:b")
+    bad = release_ops.start_deploy(db_session, release_id="b" * 40, artifact_ref="img:b")
     release_ops.mark_failed(db_session, bad, reason="post-deploy health check failed")
     db_session.flush()
 
@@ -67,10 +67,10 @@ def test_failed_deploy_does_not_disturb_current_or_previous(db_session: Session)
 
 
 def test_rollback_promotes_previous_and_marks_current_rolled_back(db_session: Session) -> None:
-    first = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
+    first = release_ops.start_deploy(db_session, release_id="1" * 40, artifact_ref="img:1")
     release_ops.mark_healthy(db_session, first)
     db_session.flush()
-    second = release_ops.start_deploy(db_session, release_id="2" * 40, image_ref="img:2")
+    second = release_ops.start_deploy(db_session, release_id="2" * 40, artifact_ref="img:2")
     release_ops.mark_healthy(db_session, second)
     db_session.flush()
 
@@ -95,15 +95,15 @@ def test_rollback_promotes_the_exact_row_probed_not_an_earlier_row_with_the_same
     SHA: a `.first()` lookup keyed on `release_id` alone could return the
     older `failed` attempt instead, silently promoting a release that
     already failed its own health check."""
-    failed_attempt = release_ops.start_deploy(db_session, release_id="x" * 40, image_ref="img:x")
+    failed_attempt = release_ops.start_deploy(db_session, release_id="x" * 40, artifact_ref="img:x")
     release_ops.mark_failed(db_session, failed_attempt, reason="post-deploy health check failed")
     db_session.flush()
 
-    fixed_retry = release_ops.start_deploy(db_session, release_id="x" * 40, image_ref="img:x")
+    fixed_retry = release_ops.start_deploy(db_session, release_id="x" * 40, artifact_ref="img:x")
     release_ops.mark_healthy(db_session, fixed_retry)
     db_session.flush()
 
-    later = release_ops.start_deploy(db_session, release_id="y" * 40, image_ref="img:y")
+    later = release_ops.start_deploy(db_session, release_id="y" * 40, artifact_ref="img:y")
     release_ops.mark_healthy(db_session, later)
     db_session.flush()
 
@@ -131,13 +131,13 @@ def test_third_consecutive_healthy_deploy_demotes_oldest_to_plain_history(
     <-> previous — not an arbitrary-depth undo stack. A third consecutive
     healthy deploy should leave the first release as plain history: no
     longer `current` or `previous`, not silently still tracked as either."""
-    first = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
+    first = release_ops.start_deploy(db_session, release_id="1" * 40, artifact_ref="img:1")
     release_ops.mark_healthy(db_session, first)
     db_session.flush()
-    second = release_ops.start_deploy(db_session, release_id="2" * 40, image_ref="img:2")
+    second = release_ops.start_deploy(db_session, release_id="2" * 40, artifact_ref="img:2")
     release_ops.mark_healthy(db_session, second)
     db_session.flush()
-    third = release_ops.start_deploy(db_session, release_id="3" * 40, image_ref="img:3")
+    third = release_ops.start_deploy(db_session, release_id="3" * 40, artifact_ref="img:3")
     release_ops.mark_healthy(db_session, third)
     db_session.flush()
 
@@ -152,7 +152,7 @@ def test_get_previous_is_none_after_a_single_deploy(db_session: Session) -> None
     that check to the caller, which resolves and health-verifies the
     target once rather than having `rollback` re-derive it) — a single
     deploy has nothing to fall back to."""
-    only = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
+    only = release_ops.start_deploy(db_session, release_id="1" * 40, artifact_ref="img:1")
     release_ops.mark_healthy(db_session, only)
     db_session.flush()
 
@@ -178,15 +178,15 @@ def test_deploy_auto_rollback_then_recovery_still_tracks_last_known_good(
     untouched), then another healthy deploy. Confirms `mark_failed` never
     corrupts the current/previous bookkeeping that a later successful
     deploy builds on."""
-    good = release_ops.start_deploy(db_session, release_id="1" * 40, image_ref="img:1")
+    good = release_ops.start_deploy(db_session, release_id="1" * 40, artifact_ref="img:1")
     release_ops.mark_healthy(db_session, good)
     db_session.flush()
 
-    bad = release_ops.start_deploy(db_session, release_id="b" * 40, image_ref="img:b")
+    bad = release_ops.start_deploy(db_session, release_id="b" * 40, artifact_ref="img:b")
     release_ops.mark_failed(db_session, bad, reason="health check failed")
     db_session.flush()
 
-    fixed = release_ops.start_deploy(db_session, release_id="2" * 40, image_ref="img:2")
+    fixed = release_ops.start_deploy(db_session, release_id="2" * 40, artifact_ref="img:2")
     release_ops.mark_healthy(db_session, fixed)
     db_session.flush()
 

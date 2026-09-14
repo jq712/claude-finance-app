@@ -4,18 +4,20 @@
 
 ## Implementation status
 
-This ADR describes the target architecture. As of 2026-09-13 (the date of this decision), **none of it is built yet** — this is a documentation-only pass; a follow-up session implements it. Do not assume any of the below exists in code just because it's described here.
+This ADR describes the target architecture. As of 2026-09-13 (the date of this decision), most of the *code* side of it is now built (see below); the *production provisioning* side (`/opt/finance` actually existing on the VPS) is still deliberately owner-performed and out of scope for an engineering session. Do not assume a row marked "Not shipped" exists in code just because it's described here.
 
 | Piece | Status |
 |---|---|
-| `/opt/finance` provisioned, `finance-prod` Unix user, release-directory layout | **Not shipped** |
-| Host PostgreSQL instance with `finance_dev`/`finance_prod` databases | **Not shipped** — this environment currently has neither Docker nor a host Postgres installed |
+| Host PostgreSQL instance with `finance_dev`/`finance_prod` databases | **Shipped** — a systemd-managed PostgreSQL 17 instance (from PGDG) on port 5433, `finance_dev` migrated to head. `finance_prod` is not yet created — that's real production provisioning, owner-performed. |
+| `/opt/finance` provisioned, `finance-prod` Unix user, release-directory layout | **Not shipped** — owner-performed production provisioning (`docs/runbooks/deploy.md`), out of scope for an engineering session. |
 | Release-copy script (`deploy/scripts/release.sh` or equivalent) | **Not shipped** |
-| `finops deploy`/`rollback`/`restart` rewritten for the symlink/systemd model | **Not shipped** — current code still shells out to `docker compose` (ADR-016) |
-| Settings/CLI explicit-prod-opt-in (dev DSN default, prod only via explicit env path) | **Not shipped** |
-| `deploy/compose.yaml`, `deploy/compose.dev.yaml`, `Dockerfile`, `src/finance_app/ops/compose.py` removed/archived | **Not shipped** — still present, now superseded, do not extend them |
+| `finops deploy`/`rollback`/`restart` rewritten for the symlink/systemd model | **Shipped** (`src/finance_app/ops/host.py`, `src/finance_app/cli/finops.py`) — release-directory confirmation, backup gate, migration preflight, pre-promotion health check, atomic `current` repoint, `systemctl` restart (skipped with a warning until `Settings.production_units` is configured by the systemd-units PR), post-restart re-probe, auto-rollback. |
+| Non-forgeable release identity for the deploy health gate | **Shipped** (`src/finance_app/ops/identity.py`) — a `RELEASE_ID` file, `git archive export-subst`-substituted, read by resolving `sys.argv[0]` through symlinks; supersedes the Docker-model's baked `IMAGE_RELEASE_ID`. See `docs/deployment.md`'s rollback-semantics section for why this is still needed under ADR-019, correcting an earlier claim in that document that it wasn't. |
+| Settings/CLI explicit-prod-opt-in (dev DSN default, prod only via explicit env path) | **Shipped** (`src/finance_app/config/env.py`, `config/settings.py`) — `FINANCE_ENV_FILE` env var (no CLI flag), enforced by a `Settings` validator that refuses any DSN naming `finance_prod` unless the env file was explicitly set *and* it sets `FINANCE_ENV=production`. |
+| `ops.releases.image_ref` renamed to a substrate-neutral name | **Shipped** — `artifact_ref` (migration 0006). |
+| `deploy/compose.yaml`, `deploy/compose.dev.yaml`, `Dockerfile`, `src/finance_app/ops/compose.py` removed/archived | **Partially shipped** — `src/finance_app/ops/compose.py` is deleted (superseded by `ops/host.py`). `deploy/compose.yaml`, `deploy/compose.dev.yaml`, and `Dockerfile` are still present, now orphaned; a follow-up PR removes them together with the ~35 tests still exercising them. |
 | `.github/workflows/ci.yml`'s Docker-shaped jobs (`container-build`, `publish-image`, `migration-preflight`, `staging-smoke`) redesigned | **Not shipped** |
-| systemd units rewritten to invoke a venv binary instead of `docker compose run` | **Not shipped** |
+| systemd units rewritten to invoke a venv binary instead of `docker compose run` | **Not shipped** — `ops/host.py:run_systemctl` and `Settings.production_units`/`systemctl_prefix` are ready to invoke them once the unit files exist. |
 
 ## Context
 

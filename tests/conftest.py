@@ -6,8 +6,9 @@ from sqlalchemy import Engine, create_engine
 # `deploy/compose.yaml` interpolates `${FINANCE_*_DB_PASSWORD:?required}`/
 # `${PLAID_*:?required}` — in production these come from
 # `deploy/scripts/with-production-env.sh` (systemd encrypted credentials).
-# `tests/unit/test_ops_compose_env_regression.py` exercises `run_compose`'s
-# real environment-merging behavior (QA-1), which needs the same shape of
+# `tests/unit/test_ops_host_env_regression.py` (formerly
+# `test_ops_compose_env_regression.py`) exercises `run_release`'s real
+# environment-merging behavior (QA-1), which needs the same shape of
 # ambient environment to prove anything; `.github/workflows/ci.yml`'s
 # `staging-smoke` job uses the identical synthetic placeholder pattern.
 # `setdefault` so a real CI/job-level value (or a developer's own `.env`

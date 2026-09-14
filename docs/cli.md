@@ -81,8 +81,20 @@ payload in the output (`src/finance_app/ops/db.py`). `deploy`/`rollback` are the
 that change production state, and they do so narrowly: a `current`-symlink repoint plus a
 `systemctl restart` of the production units, plus a bookkeeping row (`src/finance_app/ops/release.py`,
 conceptually unchanged from the Docker design — it only ever tracked release identifiers and
-status, never anything Docker-specific). None of them accept a SQL string, a shell string, or an
-arbitrary command — see `docs/deployment.md` and `docs/runbooks/deploy.md` for exactly how
-`deploy`/`rollback`/`restart` operate in production. **As of 2026-09-13 this table describes the
-target design (ADR-019); the current code still shells out to `docker compose` via
-`src/finance_app/ops/compose.py` and has not been rewritten yet** — a follow-up session's work.
+status, never anything Docker-specific; only its `image_ref` column was renamed to `artifact_ref`).
+None of them accept a SQL string, a shell string, or an arbitrary command — see
+`docs/deployment.md` and `docs/runbooks/deploy.md` for exactly how `deploy`/`rollback`/`restart`
+operate in production.
+
+All three write commands also accept `--release-root PATH` (default `Settings.release_root`,
+`/opt/finance`) — the same seam that makes them unit-testable against a `tmp_path` with no
+`/opt/finance` and no root anywhere in the process. Passing it explicitly at anything other than
+the production default is also the only way to bypass `config/settings.py`'s explicit-prod-opt-in
+guard's release-root check; pointed at `/opt/finance` itself, a command refuses (exit 2) unless
+this process's own `FINANCE_ENV_FILE` was explicitly set to a production env file.
+
+**As of 2026-09-13**, `finops deploy`/`rollback`/`restart` are rewritten for ADR-019's bare-metal
+symlink model (`src/finance_app/ops/host.py`, `src/finance_app/cli/finops.py`) — `docker compose`/
+`src/finance_app/ops/compose.py` no longer exist. Not yet shipped: the systemd unit files
+themselves (`finops deploy`/`restart` skip the `systemctl restart` step with a warning until
+`Settings.production_units` is configured) and the release-copy script.

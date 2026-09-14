@@ -31,8 +31,14 @@ from finance_app import __version__
 from finance_app.config.settings import Settings, get_settings
 from finance_app.db.models.ops import BackupRun, OperationalError, Release, SyncRun
 from finance_app.db.models.plaid import Item, SyncState
-from finance_app.ops.compose import DEFAULT_COMPOSE_FILE, ComposeError
-from finance_app.ops.compose import run_compose as _run_compose
+from finance_app.ops.host import (
+    DEFAULT_RELEASE_ROOT,
+    HostCommandError,
+    current_link,
+    read_current_target,
+    release_dir,
+)
+from finance_app.ops.host import run_release as _run_release
 
 # A sync more than this many hours stale is flagged unhealthy — the daily
 # timer's mandatory cadence (ADR-011/ADR-012) means anything beyond ~36h
@@ -247,7 +253,7 @@ def current_release(session: Session) -> dict[str, Any] | None:
         return None
     return {
         "release_id": row.release_id,
-        "image_ref": row.image_ref,
+        "artifact_ref": row.artifact_ref,
         "deployed_at": row.deployed_at.isoformat(),
         "health_check_status": row.health_check_status,
     }
@@ -267,27 +273,50 @@ def previous_release(session: Session) -> dict[str, Any] | None:
         return None
     return {
         "release_id": row.release_id,
-        "image_ref": row.image_ref,
+        "artifact_ref": row.artifact_ref,
         "deployed_at": row.deployed_at.isoformat(),
+    }
+
+
+def release_topology(
+    session: Session, *, release_root: str = DEFAULT_RELEASE_ROOT
+) -> dict[str, Any]:
+    """Compares what `ops.releases` bookkeeping believes is `current`
+    against what the `current` symlink actually resolves to on disk
+    (ADR-019). This is the bare-metal analogue of "which image is
+    actually running" — a failure mode the Docker model never had,
+    because a container's identity couldn't drift from what `docker
+    compose` last started without a corresponding record. A symlink can:
+    a hand-repointed `current`, an interrupted rollback, or a crash
+    between `repoint_current` and the bookkeeping commit all leave the
+    two disagreeing. `finops restart` refuses to proceed on a
+    disagreement rather than silently restarting whatever `current`
+    happens to point at."""
+    bookkeeping = current_release(session)
+    symlink_target = read_current_target(release_root)
+    bookkeeping_release_id = bookkeeping["release_id"] if bookkeeping is not None else None
+    return {
+        "bookkeeping_current": bookkeeping_release_id,
+        "symlink_current": symlink_target,
+        "agrees": bookkeeping_release_id == symlink_target,
     }
 
 
 def _application_liveness() -> str:
     """A lightweight in-process liveness signal for `aggregate_health`
     (QA-8): this function running at all proves the process's import
-    graph and settings came up, which a crash-looping container never
-    gets to. Deliberately *not* the same check as `deploy_health_check`'s
+    graph and settings came up, which a crash-looping process never gets
+    to. Deliberately *not* the same check as `deploy_health_check`'s
     `probe_release` below — that one is externally observed (a one-shot
-    `finance selfcheck` run of the exact release image, from the `deploy`
-    Compose service, the only one with Docker socket access) and so can
-    actually catch "the release image itself is broken", not just "this
-    already-running process still imports". This one runs from *inside*
-    the process being asked "are you healthy" and so cannot catch that
-    failure mode — it is a weaker signal, used here only because
-    `aggregate_health` is also called from `finops health`/`finance-
-    health.timer`, which run inside the plain `app`/observer context that
-    has no Docker socket access at all. Still strictly better than a
-    literal that could never fail."""
+    `finance selfcheck` run of the exact release directory under
+    deployment) and so can actually catch "the release itself is
+    broken", not just "this already-running process still imports". This
+    one runs from *inside* the process being asked "are you healthy" and
+    so cannot catch that failure mode — it is a weaker signal, used here
+    only because `aggregate_health` is also called from `finops health`/
+    `finance-health.timer`, which run inside the plain observer context
+    with no reason to shell out to a release binary. Still strictly
+    better than a literal that could never fail."""
     try:
         get_settings()
     except Exception:  # noqa: BLE001 - any failure here means "not healthy", full stop
@@ -301,17 +330,15 @@ def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
     `None` if there isn't one.
 
     Scans the whole stream and keeps going past any line that doesn't fit,
-    rather than stopping at the first one: `docker compose run` can
-    interleave startup chatter (pull progress, container-creation
-    notices) around the command's own output on some Compose versions,
-    and nothing rules out an unrelated JSON object (a structured log line
-    — `configure_logging` installs a JSON `StreamHandler` on stdout, and
-    the `app` service runs with `LOG_FORMAT: json`, so the release image's
-    own log stream already shares this file descriptor) elsewhere in the
-    stream. Requiring both sentinel keys, rather than accepting the first
+    rather than stopping at the first one: a plain venv console-script
+    still shares stdout with `configure_logging`'s JSON handler, and
+    nothing rules out an unrelated JSON object (a structured log line —
+    the process runs with `LOG_FORMAT: json`, so its own log stream
+    already shares this file descriptor) elsewhere in the stream.
+    Requiring both sentinel keys, rather than accepting the first
     parseable dict, keeps such a line from being misread as the selfcheck
-    payload and reported as `wrong_image` or `unreachable` for a release
-    that is actually fine.
+    payload and reported as `wrong_release` or `unreachable` for a
+    release that is actually fine.
 
     QA-36: every string on this stream is attacker-influenceable per
     CLAUDE.md (Plaid merchant text, model responses, `ops.errors.message`
@@ -319,9 +346,9 @@ def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
     candidate line matches the sentinel shape, there is no positional rule
     ("last one wins") that can be trusted to pick the real payload over a
     lookalike. If every candidate is identical, there is no real
-    ambiguity (Compose or the image printed the same line twice) and it is
-    returned as-is. Otherwise this fails closed: a deterministic gate must
-    not resolve "which of these is the real payload" by position, so
+    ambiguity (something printed the same line twice) and it is returned
+    as-is. Otherwise this fails closed: a deterministic gate must not
+    resolve "which of these is the real payload" by position, so
     `overall` is forced to a value `probe_release` never treats as
     healthy, and every disagreeing candidate is preserved in `detail` for
     the operator instead of silently discarded."""
@@ -343,7 +370,7 @@ def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
         return first
     return {
         "release_id": first.get("release_id"),
-        "image_release_id": first.get("image_release_id"),
+        "installed_release_id": first.get("installed_release_id"),
         "overall": "ambiguous",
         "ambiguous_candidates": candidates,
     }
@@ -352,46 +379,55 @@ def _parse_selfcheck_stdout(stdout: str) -> dict[str, Any] | None:
 def probe_release(
     *,
     release_id: str,
-    compose_file: str = DEFAULT_COMPOSE_FILE,
-    run_compose_fn: Any = _run_compose,
+    release_root: str = DEFAULT_RELEASE_ROOT,
+    via_current: bool = False,
+    run_release_fn: Any = _run_release,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """ADR-016 D3: a one-shot run of the *exact image* under deployment —
-    `--profile app run --rm -T app finance selfcheck --json`, with
-    `RELEASE_ID` pinned to `release_id` — replacing the old `exec` into
-    whatever `app` container happened to already be running. That answered
-    only "does some container respond right now"; under D2 there is no
-    long-running `app` container for it to find, and even before D2 it
-    could never tell a healthy release from a stale one still holding the
-    name.
+    """A one-shot run of `finance selfcheck --json` against a *specific*
+    release tree (ADR-019, carrying forward ADR-016 D3's reasoning): the
+    exact release directory under deployment, with `RELEASE_ID` pinned to
+    `release_id` for reporting purposes only — never for the identity
+    comparison below, which is exactly the tautology QA-37 was about.
 
-    Returns `{"status": "healthy"|"unhealthy"|"wrong_image"|"unreachable",
-    "reported_release_id": str | None, "detail": ...}`. `"wrong_image"` —
-    the image that actually ran reports a `release_id` other than the one
-    requested — is a failure mode no `exec`-based probe could ever detect,
-    since `exec` never confirms which image is running at all."""
+    `via_current` selects which path is actually invoked:
+    `<release_root>/releases/<release_id>/.venv/bin/finance` (the normal
+    pre-promotion probe, before `current` has been touched) when `False`,
+    or `<release_root>/current/.venv/bin/finance` (a post-restart
+    liveness/identity re-check *through the symlink itself*) when `True`
+    — this is what lets `finops restart`/the post-deploy re-probe detect
+    "the process that actually started is not the release we just
+    promoted", a failure mode unique to a mutable symlink that a
+    container tag never had.
+
+    Returns `{"status": "healthy"|"unhealthy"|"wrong_release"|"unreachable",
+    "reported_release_id": str | None, "detail": ...}`. `"wrong_release"`
+    — the release that actually ran reports an `installed_release_id`
+    other than the one requested — is compared against
+    `ops/identity.py`'s file-based identity, never against the
+    `RELEASE_ID` environment variable this very call sets a few lines
+    down (QA-37: comparing that against itself can never disagree, so it
+    could never actually detect a wrong release)."""
+
+    release_path = (
+        current_link(release_root) if via_current else release_dir(release_root, release_id)
+    )
     env = {"RELEASE_ID": release_id}
     try:
-        result = run_compose_fn(
-            compose_file,
-            "--profile",
-            "app",
-            "run",
-            "--rm",
-            "-T",
-            "app",
+        result = run_release_fn(
+            release_path,
             "finance",
             "selfcheck",
             "--json",
             env=env,
             timeout=timeout,
         )
-    except ComposeError as exc:
+    except HostCommandError as exc:
         payload = _parse_selfcheck_stdout(exc.stdout)
         if payload is None:
             return {"status": "unreachable", "reported_release_id": None, "detail": str(exc)}
-        reported = payload.get("image_release_id")
-        status_value = "wrong_image" if reported != release_id else "unhealthy"
+        reported = payload.get("installed_release_id")
+        status_value = "wrong_release" if reported != release_id else "unhealthy"
         return {"status": status_value, "reported_release_id": reported, "detail": payload}
 
     payload = _parse_selfcheck_stdout(result.stdout)
@@ -401,14 +437,9 @@ def probe_release(
             "reported_release_id": None,
             "detail": "selfcheck produced no parseable JSON output",
         }
-    # QA-37: compared against `image_release_id` — the build-time identity
-    # baked into the image (Dockerfile `ARG RELEASE_ID`) — never against
-    # `release_id`, which is only the `RELEASE_ID` environment variable
-    # this very call set a few lines up; comparing that against itself can
-    # never disagree, so it could never actually detect a wrong image.
-    reported = payload.get("image_release_id")
+    reported = payload.get("installed_release_id")
     if reported != release_id:
-        return {"status": "wrong_image", "reported_release_id": reported, "detail": payload}
+        return {"status": "wrong_release", "reported_release_id": reported, "detail": payload}
     if payload.get("overall") != "healthy":
         return {"status": "unhealthy", "reported_release_id": reported, "detail": payload}
     return {"status": "healthy", "reported_release_id": reported, "detail": payload}
@@ -418,34 +449,35 @@ def deploy_health_check(
     session: Session,
     *,
     release_id: str,
-    compose_file: str = DEFAULT_COMPOSE_FILE,
-    run_compose_fn: Any = _run_compose,
+    release_root: str = DEFAULT_RELEASE_ROOT,
+    via_current: bool = False,
+    run_release_fn: Any = _run_release,
 ) -> dict[str, Any]:
     """The narrow health gate `finops deploy` uses to decide whether to
     promote a release to `current` or trigger ADR-008's auto-rollback —
     checking only things *this deploy* can actually break: is the
-    database reachable from the deploy control plane, and does the
-    release image itself (`probe_release`) come up healthy at its own
-    reported migration head. Deliberately does not fold in
-    `aggregate_health`'s broader operational signals (Plaid sync
-    staleness, backup verification) — QA-14: a pre-existing stale sync or
-    unverified backup has nothing to do with whether the release that was
-    *just* deployed is healthy, and conflating the two meant a
+    database reachable, and does the release tree itself (`probe_release`)
+    come up healthy at its own reported migration head. Deliberately does
+    not fold in `aggregate_health`'s broader operational signals (Plaid
+    sync staleness, backup verification) — QA-14: a pre-existing stale
+    sync or unverified backup has nothing to do with whether the release
+    that was *just* deployed is healthy, and conflating the two meant a
     pre-existing Plaid outage auto-rolled back every subsequent deploy —
     including the deploy of the fix for that very outage — discarding a
     known-good release each time (QA-2). See `aggregate_health` for the
     broader view `finops health`/the health timer use instead.
 
-    Does not call `migration_status` itself (QA-22): this function runs
-    inside the `deploy` Compose service, which is pinned to
-    `${RELEASE_ID:-latest}` from *before* the new release id was known —
-    it is always running the previous release's image, never the one
-    being deployed, so it is structurally unable to know what migration
-    head the new release expects. `probe_release` answers that from
-    inside the release image itself instead."""
+    Does not call `migration_status` itself (QA-22): this function's own
+    result must not depend on which release directory the calling process
+    happens to be running from — only the release tree under probe (via
+    `probe_release`, from inside its own selfcheck) can answer what
+    migration head *it* expects."""
     db = db_status(session)
     application = probe_release(
-        release_id=release_id, compose_file=compose_file, run_compose_fn=run_compose_fn
+        release_id=release_id,
+        release_root=release_root,
+        via_current=via_current,
+        run_release_fn=run_release_fn,
     )
     healthy = db["status"] == "healthy" and application["status"] == "healthy"
     detail = application["detail"]

@@ -54,15 +54,15 @@ def test_auto_rollback_returns_to_the_release_that_was_actually_running(clean_re
     `mark_failed`), so production is rolled back two versions and B is
     marked `rolled_back` despite never having been unhealthy."""
     with Session(clean_releases) as session:
-        a = release_ops.start_deploy(session, release_id="a" * 7, image_ref="img:a")
+        a = release_ops.start_deploy(session, release_id="a" * 7, artifact_ref="img:a")
         release_ops.mark_healthy(session, a)
         session.commit()
-        b = release_ops.start_deploy(session, release_id="b" * 7, image_ref="img:b")
+        b = release_ops.start_deploy(session, release_id="b" * 7, artifact_ref="img:b")
         release_ops.mark_healthy(session, b)
         session.commit()
 
         # Deploy C; post-deploy health fails, exactly as cli/finops.py does.
-        c = release_ops.start_deploy(session, release_id="c" * 7, image_ref="img:c")
+        c = release_ops.start_deploy(session, release_id="c" * 7, artifact_ref="img:c")
         release_ops.mark_failed(session, c, reason="post-deploy health failed")
         session.commit()
 
@@ -89,15 +89,15 @@ def test_two_concurrent_deploys_cannot_both_become_current(clean_releases) -> No
     `deployed_at desc` and `finops version` reports a release that may not
     be the one running."""
     with Session(clean_releases) as session:
-        first = release_ops.start_deploy(session, release_id="1" * 7, image_ref="img:1")
+        first = release_ops.start_deploy(session, release_id="1" * 7, artifact_ref="img:1")
         release_ops.mark_healthy(session, first)
         session.commit()
 
     s1, s2 = Session(clean_releases), Session(clean_releases)
     try:
-        d1 = release_ops.start_deploy(s1, release_id="2" * 7, image_ref="img:2")
+        d1 = release_ops.start_deploy(s1, release_id="2" * 7, artifact_ref="img:2")
         s1.commit()
-        d2 = release_ops.start_deploy(s2, release_id="3" * 7, image_ref="img:3")
+        d2 = release_ops.start_deploy(s2, release_id="3" * 7, artifact_ref="img:3")
         s2.commit()
 
         # Interleaved: both read the state, then both commit.
@@ -125,15 +125,15 @@ def test_rollback_after_a_crashed_deploy_does_not_discard_the_running_release(
     clean_releases,
 ) -> None:
     with Session(clean_releases) as session:
-        a = release_ops.start_deploy(session, release_id="a" * 7, image_ref="img:a")
+        a = release_ops.start_deploy(session, release_id="a" * 7, artifact_ref="img:a")
         release_ops.mark_healthy(session, a)
         session.commit()
-        b = release_ops.start_deploy(session, release_id="b" * 7, image_ref="img:b")
+        b = release_ops.start_deploy(session, release_id="b" * 7, artifact_ref="img:b")
         release_ops.mark_healthy(session, b)
         session.commit()
 
         # Process killed here: the row is stuck in 'deploying' with no reaper.
-        release_ops.start_deploy(session, release_id="c" * 7, image_ref="img:c")
+        release_ops.start_deploy(session, release_id="c" * 7, artifact_ref="img:c")
         session.commit()
 
         stuck = session.execute(
@@ -144,14 +144,14 @@ def test_rollback_after_a_crashed_deploy_does_not_discard_the_running_release(
 
 def test_redeploying_the_current_sha_leaves_a_distinct_rollback_target(clean_releases) -> None:
     with Session(clean_releases) as session:
-        a = release_ops.start_deploy(session, release_id="a" * 7, image_ref="img:a")
+        a = release_ops.start_deploy(session, release_id="a" * 7, artifact_ref="img:a")
         release_ops.mark_healthy(session, a)
         session.commit()
-        b1 = release_ops.start_deploy(session, release_id="b" * 7, image_ref="img:b")
+        b1 = release_ops.start_deploy(session, release_id="b" * 7, artifact_ref="img:b")
         release_ops.mark_healthy(session, b1)
         session.commit()
         # Operator re-runs `finops deploy bbbbbbb` (idempotent retry).
-        b2 = release_ops.start_deploy(session, release_id="b" * 7, image_ref="img:b")
+        b2 = release_ops.start_deploy(session, release_id="b" * 7, artifact_ref="img:b")
         release_ops.mark_healthy(session, b2)
         session.commit()
 

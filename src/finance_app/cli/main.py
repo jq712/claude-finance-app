@@ -106,15 +106,16 @@ def status() -> None:
 
 @app.command()
 def selfcheck(json_output: bool = typer.Option(False, "--json")) -> None:
-    """Deterministic post-deploy smoke check (ADR-016 D3): database
-    reachable, this image's migration head matches what's applied. Exits
-    0 iff `overall == "healthy"`; never 0 on a database or migration
-    problem, unlike `finance status` above, which always exits 0 so it
-    stays useful for basic inspection. `finops deploy` runs this via
-    `docker compose run --rm app finance selfcheck --json` against the
-    exact image being deployed (`ops.status.probe_release`) — the deploy
-    container itself is pinned to the *previous* release and can never
-    answer this."""
+    """Deterministic post-deploy smoke check (ADR-016 D3, adapted for
+    ADR-019): database reachable, this release's migration head matches
+    what's applied. Exits 0 iff `overall == "healthy"`; never 0 on a
+    database or migration problem, unlike `finance status` above, which
+    always exits 0 so it stays useful for basic inspection. `finops
+    deploy` runs this via `<release>/.venv/bin/finance selfcheck --json`
+    against the exact release tree being deployed
+    (`ops.status.probe_release`) — the `finops` control-plane process
+    itself may be running from a different release and can never answer
+    this."""
     result = _selfcheck()
     if json_output:
         print(json.dumps(result))
