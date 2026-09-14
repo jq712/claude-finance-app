@@ -196,6 +196,27 @@ def test_finance_backup_cannot_advance_sequences(role_engine) -> None:
         conn.exec_driver_sql("SELECT nextval('plaid.items_id_seq')")
 
 
+@pytest.mark.parametrize(
+    "role",
+    ["finance_owner", "finance_app", "finance_agent", "finance_observer", "finance_backup"],
+)
+def test_finance_migrator_is_a_member_of_every_managed_role(role_engine, role: str) -> None:
+    """migrations/versions/0007_..._finance_migrator_role_membership.py:
+    without this membership, 0002_..._roles_and_grants.py's downgrade()
+    fails partway through its `DROP OWNED BY <role>` loop with a Postgres
+    permission-denied error — proven end-to-end by
+    tests/integration/test_migration_reversibility.py, which exercises
+    this via the alembic CLI's exit code. This test pins the same
+    invariant directly at the grant level, so a regression here fails
+    fast and readably instead of via a subprocess return-code assertion."""
+    engine = role_engine("finance_migrator")
+    with engine.connect() as conn:
+        is_member = conn.exec_driver_sql(
+            f"SELECT pg_has_role('finance_migrator', '{role}', 'member')"
+        ).scalar_one()
+    assert is_member, f"finance_migrator is not a member of {role}"
+
+
 def test_no_arbitrary_sql_tool_exists_in_the_agent_tool_registry() -> None:
     """Static guard for docs/security-model.md invariant 2. There is no
     tools package yet (Milestone 5 builds it) — this test exists now so
