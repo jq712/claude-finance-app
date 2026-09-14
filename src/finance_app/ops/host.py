@@ -39,8 +39,24 @@ VENV_BIN = ".venv/bin"
 # before spawning anything if a configured unit doesn't match. Not a
 # shell, so this is not injection-prevention; it is a fail-closed check
 # that `Settings.production_units` was configured with something
-# unit-shaped rather than a typo or an unrelated string.
-_UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@:._-]+\.(service|timer|socket|target)$")
+# unit-shaped rather than a typo or an unrelated string. Anchored to start
+# with an alphanumeric so a value like `-H.service` (which `systemctl`
+# would parse as its own `--host` option, not a unit name) can never match.
+_UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@:._-]*\.(service|timer|socket|target)$")
+
+# `ops.releases.release_id` is caller-controlled (recorded by `finops
+# deploy`'s own argument, but also read back out of the database and
+# reused as a path component by `restart`/`_do_rollback` — security-review
+# finding #6). Any value containing a path separator or resolving to
+# `.`/`..` would let `release_dir()` construct a path outside
+# `<release_root>/releases/`. `finance_agent` has no write access to
+# `ops.releases` (verified by the existing role-grant tests), so this is
+# defense-in-depth rather than a reachable exploit today — validated here,
+# once, in `release_dir` itself, so every caller (and therefore
+# `release_is_installed`/`repoint_current`/`probe_release`, all of which
+# call `release_dir` rather than building the path themselves) inherits it
+# without needing its own check.
+_RELEASE_ID_PATH_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 class HostCommandError(RuntimeError):
@@ -63,6 +79,11 @@ class HostCommandError(RuntimeError):
 
 
 def release_dir(release_root: str | Path, release_id: str) -> Path:
+    if not _RELEASE_ID_PATH_RE.match(release_id):
+        raise HostCommandError(
+            f"{release_id!r} is not a valid release id (expected 7-40 lowercase hex "
+            "characters) — refusing to use it as a path component."
+        )
     return Path(release_root) / RELEASES_DIRNAME / release_id
 
 
@@ -152,7 +173,9 @@ def run_systemctl(
     spawning anything — a misconfigured `Settings.production_units` fails
     with a clear `HostCommandError`, never a shell injection concern (this
     never goes through a shell) but a fail-closed check that the value is
-    actually unit-shaped."""
+    actually unit-shaped. A literal `--` separates `action` from the unit
+    list in the argv itself, so even a unit name that somehow passed the
+    regex could not be parsed by `systemctl` as one of its own options."""
     if not units:
         raise HostCommandError("run_systemctl requires at least one unit name")
     for unit in units:
@@ -161,7 +184,7 @@ def run_systemctl(
                 f"{unit!r} does not look like a systemd unit name "
                 "(expected e.g. 'finance-app.service') — refusing to invoke systemctl."
             )
-    command = [*prefix, action, *units]
+    command = [*prefix, action, "--", *units]
     try:
         return runner(command, text=True, capture_output=True, check=True, timeout=timeout)
     except subprocess.CalledProcessError as exc:

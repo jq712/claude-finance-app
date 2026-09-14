@@ -119,7 +119,15 @@ def test_run_systemctl_builds_expected_argv_with_a_custom_prefix() -> None:
         runner=recording_runner,
     )
     assert calls == [
-        ["sudo", "-n", "systemctl", "restart", "finance-app.service", "finance-sync.timer"]
+        [
+            "sudo",
+            "-n",
+            "systemctl",
+            "restart",
+            "--",
+            "finance-app.service",
+            "finance-sync.timer",
+        ]
     ]
 
 
@@ -163,8 +171,22 @@ def test_repoint_current_is_atomic_and_reports_the_prior_target(tmp_path) -> Non
 
 
 def test_repoint_current_refuses_a_missing_release_directory(tmp_path) -> None:
+    # A hex-shaped id (so it passes `release_dir`'s own path-traversal
+    # validation and this test actually exercises the "directory doesn't
+    # exist" check, not that one) that simply has no directory on disk.
     with pytest.raises(HostCommandError, match="does not exist"):
-        repoint_current(tmp_path, "nonexistent")
+        repoint_current(tmp_path, "deadbee")
+
+
+def test_release_dir_rejects_a_path_traversal_shaped_release_id(tmp_path) -> None:
+    """Security-review finding #6: `ops.releases.release_id` is read back
+    out of the database and reused as a path component by
+    `restart`/`_do_rollback`. Validated once, in `release_dir` itself, so
+    every caller (`release_is_installed`, `repoint_current`,
+    `probe_release`) inherits the rejection."""
+    for hostile in ("../../etc/passwd", "..", ".", "abc/def", ""):
+        with pytest.raises(HostCommandError, match="not a valid release id"):
+            release_dir(tmp_path, hostile)
 
 
 def test_repoint_current_refuses_when_current_is_a_real_directory_not_a_symlink(tmp_path) -> None:

@@ -86,6 +86,7 @@ def two_healthy_releases(role_engine, tmp_path):
     yield engine, tmp_path
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
+        conn.execute(text("DELETE FROM ops.backup_runs"))
 
 
 def _selfcheck_stub(overall: str):  # noqa: ANN202
@@ -351,7 +352,17 @@ def test_deploy_leaves_no_release_pending_when_the_health_probe_raises(
 
     engine, release_root = two_healthy_releases
     _make_release_dir(release_root, "c" * 7)
-    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
+    # `deploy`'s backup gate (`status.backup_status`) needs a real, recent
+    # successful row — it no longer goes through a `latest_successful_
+    # backup` name in `cli/finops.py`'s own namespace to patch (security-
+    # review finding #7's fix).
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO ops.backup_runs (run_type, status, started_at, finished_at) "
+                "VALUES ('backup', 'success', now(), now())"
+            )
+        )
 
     def permission_denied(release_path, *args, env=None, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
         if "selfcheck" in args:

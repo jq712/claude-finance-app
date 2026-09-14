@@ -148,6 +148,7 @@ def stale_sync_and_two_good_releases(role_engine, tmp_path):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM ops.releases"))
         conn.execute(text("DELETE FROM ops.sync_runs"))
+        conn.execute(text("DELETE FROM ops.backup_runs"))
         conn.execute(text("DELETE FROM plaid.items WHERE plaid_item_id = 'qa-stale-item'"))
 
 
@@ -158,7 +159,17 @@ def test_a_pre_existing_stale_sync_does_not_auto_roll_back_an_unrelated_deploy(
 
     engine, release_root = stale_sync_and_two_good_releases
     monkeypatch.setattr(finops_module, "run_release", _healthy_selfcheck_run_release)
-    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
+    # `deploy`'s backup gate (`status.backup_status`) needs a real, recent
+    # successful row — `cli/finops.py` no longer imports a
+    # `latest_successful_backup` name to patch (security-review finding
+    # #7's fix).
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO ops.backup_runs (run_type, status, started_at, finished_at) "
+                "VALUES ('backup', 'success', now(), now())"
+            )
+        )
 
     result = runner.invoke(app, ["deploy", "c" * 7, "--release-root", str(release_root)])
 

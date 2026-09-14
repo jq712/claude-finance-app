@@ -1,19 +1,33 @@
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 from finance_app.config.env import (
     PRODUCTION_ENV_FILE_VAR,
     ProductionAccessRefusedError,
+    production_opt_in,
     resolve_env_file,
 )
 
 # The only database name `Settings` will ever resolve a DSN against
-# without `FINANCE_ENV_FILE` having been explicitly set (ADR-019's "the
-# CLI defaults to the dev DSN, prod only via explicit env path").
+# without the resolved env file's own content declaring
+# `FINANCE_ENV=production` (ADR-019's "the CLI defaults to the dev DSN,
+# prod only via explicit env path").
 _PRODUCTION_DATABASE_NAME = "finance_prod"
+
+# Query-string keys that let libpq override a DSN's own path-encoded
+# database at connect time (`dbname=`, or `service=` naming a
+# `~/.pg_service.conf` entry that itself sets `dbname`) — security-review
+# finding #3: a DSN can read `.../finance_dev?dbname=finance_prod` and
+# actually connect to `finance_prod`, while `make_url(dsn).database` still
+# reports `finance_dev`. Any DSN carrying one of these, or omitting a
+# database segment entirely (letting `PGDATABASE`/`PGSERVICE` in the
+# process environment fill it in), is treated as ambiguous and refused
+# exactly like a DSN naming `finance_prod` outright — the guard cannot
+# prove such a DSN is safe, so it does not get the benefit of the doubt.
+_DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"dbname", "service"})
 
 # Every field holding a DSN — the validator below checks each of these,
 # never a hardcoded list of role names, so a future DSN field is covered
@@ -27,6 +41,24 @@ _DSN_FIELD_NAMES = (
 )
 
 
+def _refuses_as_production_or_ambiguous(dsn: str) -> bool:
+    """`True` if `dsn` either names `finance_prod` outright, or is shaped
+    in a way that lets something outside the DSN string itself decide the
+    real target database (security-review finding #3). Never raises: an
+    unparseable DSN is not this function's problem to diagnose —
+    SQLAlchemy/psycopg raise their own clear error the moment it's
+    actually used."""
+    try:
+        url = make_url(dsn)
+    except Exception:  # noqa: BLE001
+        return False
+    if _DATABASE_OVERRIDE_QUERY_KEYS & url.query.keys():
+        return True
+    if not url.database:
+        return True
+    return url.database == _PRODUCTION_DATABASE_NAME
+
+
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables / .env.
 
@@ -36,21 +68,13 @@ class Settings(BaseSettings):
 
     Construct via `get_settings()`, not `Settings()` directly, outside of
     tests — `get_settings()` resolves which env file to load from
-    `FINANCE_ENV_FILE` (`config/env.py`) and passes along whether that
-    resolution was explicit, which `_reject_production_dsn_without_explicit_opt_in`
-    below needs to tell a deliberate production connection from an
-    accidental one.
+    `FINANCE_ENV_FILE` and whether *that file's own content* declares
+    `FINANCE_ENV=production` (`config/env.py`), which
+    `_reject_production_dsn_without_explicit_opt_in` below needs to tell a
+    deliberate production connection from an accidental one.
     """
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
-    # Set by `get_settings()` to whatever `config.env.resolve_env_file()`
-    # returned as its second element — never itself read from the
-    # environment (an env var named e.g. `env_file_explicit` would just
-    # move the forgeability problem this field exists to close onto a new
-    # name). `exclude=True` so it never round-trips through
-    # `model_dump()`/`--json` output.
-    env_file_explicit: bool = Field(default=False, exclude=True)
 
     finance_env: str = "development"
 
@@ -164,38 +188,42 @@ class Settings(BaseSettings):
     def _reject_production_dsn_without_explicit_opt_in(self) -> "Settings":
         """ADR-019: "the default must be incapable of touching production
         data at all, not merely configured not to." Enforced, not just
-        documented — every DSN field is parsed and its database name
-        checked; if any names `finance_prod` while this `Settings` was not
-        built from an explicitly-set `FINANCE_ENV_FILE` naming
-        `finance_env=production`, construction itself fails.
+        documented — every DSN field is parsed; if any names `finance_prod`
+        outright, or is shaped so that something other than the DSN string
+        itself could decide the real target (`_refuses_as_production_or_
+        ambiguous`: a `dbname=`/`service=` query override, or a DSN with no
+        database segment at all, letting `PGDATABASE`/`PGSERVICE` in the
+        process environment fill it in — security-review finding #3),
+        while `config.env.production_opt_in()` is not `True`, construction
+        itself fails.
 
-        Both conditions are required, not just one: `env_file_explicit`
-        alone would let an operator accidentally leave `FINANCE_ENV_FILE`
-        pointed at a stale path; `finance_env == "production"` alone would
-        let a plain shell export of `DATABASE_URL=...finance_prod...`
-        (with no env file at all) sail through, since nothing before this
-        validator ever reads `finance_env`. Requiring both closes the gap
-        `finance_env` being dead config (declared, never read anywhere in
-        `src/`) previously left open.
-        """
-        if self.finance_env == "production" and self.env_file_explicit:
+        Calls `production_opt_in()` fresh rather than trusting a field on
+        `self` — a `pydantic_settings.BaseSettings` field is, by
+        construction, automatically settable by a same-named environment
+        variable unless fought out of that mapping, so a stored
+        `self.production_opt_in`/`self.env_file_explicit` boolean is
+        itself forgeable by a bare `export PRODUCTION_OPT_IN=1` with no
+        env file involved at all (security-review finding #1/#2, found
+        twice against two successive versions of this field). A plain
+        function, called for its return value and never stored, has no
+        such surface. It resolves the sentinel from the target env file's
+        own parsed content — never from `self.finance_env` or any other
+        field on this object, which the ambient process environment can
+        set directly regardless of what `FINANCE_ENV_FILE` names."""
+        if production_opt_in():
             return self
         for field_name in _DSN_FIELD_NAMES:
             dsn = getattr(self, field_name).get_secret_value()
             if not dsn:
                 continue
-            try:
-                database_name = make_url(dsn).database
-            except Exception:  # noqa: BLE001 - an unparseable DSN is not this
-                # validator's problem to diagnose; SQLAlchemy/psycopg will
-                # raise their own clear error the moment it's actually used.
-                continue
-            if database_name == _PRODUCTION_DATABASE_NAME:
+            if _refuses_as_production_or_ambiguous(dsn):
                 raise ProductionAccessRefusedError(
-                    f"{field_name} names the {_PRODUCTION_DATABASE_NAME!r} database, but "
-                    f"{PRODUCTION_ENV_FILE_VAR} was not explicitly set (or its file's "
-                    "FINANCE_ENV is not 'production'). Refusing to construct Settings that "
-                    "could touch production data by accident — see ADR-019."
+                    f"{field_name} names the {_PRODUCTION_DATABASE_NAME!r} database (or is "
+                    "shaped so that something outside the DSN string could redirect it "
+                    f"there), but {PRODUCTION_ENV_FILE_VAR} was not explicitly set to a file "
+                    "whose own content declares FINANCE_ENV=production. Refusing to "
+                    "construct Settings that could touch production data by accident — "
+                    "see ADR-019."
                 )
         return self
 
@@ -234,5 +262,5 @@ def get_settings() -> Settings:
     not mean a fresh connection pool every call — only a fresh read of
     what the DSN currently is.
     """
-    path, explicit = resolve_env_file()
-    return Settings(_env_file=path, env_file_explicit=explicit)
+    path, production_opt_in = resolve_env_file()
+    return Settings(_env_file=path, production_opt_in=production_opt_in)

@@ -44,6 +44,7 @@ drive the real Typer app with the release runner injected.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import json
 import subprocess
 from pathlib import Path
@@ -282,7 +283,24 @@ def test_deploy_prints_manual_intervention_when_the_rollback_target_is_also_unhe
     # markup/auto-rollback behavior below, not on building a real release
     # tree and a real backup row.
     monkeypatch.setattr(finops_module, "release_is_installed", lambda _root, _release_id: True)
-    monkeypatch.setattr(finops_module, "latest_successful_backup", lambda: object())
+    # `deploy`'s backup gate calls `status.backup_status(obs_session)` —
+    # the fake `_Session` above has no real backing for it (its
+    # `execute()` unconditionally raises), so the gate itself is stubbed
+    # directly to its "proceed" answer, matching `release_is_installed`
+    # above (security-review finding #7's fix moved this off a
+    # `latest_successful_backup` name that used to live in
+    # `cli/finops.py`'s own namespace).
+    monkeypatch.setattr(
+        finops_module.status,
+        "backup_status",
+        lambda _s: {
+            "status": "verified",
+            "last_backup": {
+                "status": "success",
+                "started_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            },
+        },
+    )
     monkeypatch.setattr(
         release_ops, "start_deploy", lambda _s, *, release_id, artifact_ref: deployed
     )

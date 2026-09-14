@@ -322,12 +322,20 @@ def test_wrong_release_detection_is_not_a_tautology() -> None:
 
     tmp_dir = tempfile.mkdtemp()
     try:
+        # `releases/<sha>/` — the real shape a release-copy step produces
+        # (`docs/runbooks/deploy.md`), not a bare extraction directly into
+        # a scratch dir: `installed_release_root()` requires the derived
+        # directory's parent be literally named `releases` before trusting
+        # it (QA-56), so the archive must land inside one to exercise the
+        # real path this test is about.
+        release_path = Path(tmp_dir) / "releases" / commit_ish
+        release_path.mkdir(parents=True)
         archive = subprocess.run(
             ["git", "archive", commit_ish], cwd=_REPO_ROOT, stdout=subprocess.PIPE, check=True
         )
-        subprocess.run(["tar", "-x", "-C", tmp_dir], input=archive.stdout, check=True)
+        subprocess.run(["tar", "-x", "-C", str(release_path)], input=archive.stdout, check=True)
 
-        identity_file = Path(tmp_dir) / "RELEASE_ID"
+        identity_file = release_path / "RELEASE_ID"
         assert identity_file.is_file(), "git archive did not produce a RELEASE_ID file at all"
         archived_identity = identity_file.read_text().strip()
         assert archived_identity == commit_ish, (
@@ -339,7 +347,7 @@ def test_wrong_release_detection_is_not_a_tautology() -> None:
         # The identity comparison must not be forgeable by whoever starts
         # the process: injecting an attacker-chosen RELEASE_ID into the
         # environment must not change what gets read back.
-        fake_binary_dir = Path(tmp_dir) / ".venv" / "bin"
+        fake_binary_dir = release_path / ".venv" / "bin"
         fake_binary_dir.mkdir(parents=True)
         (fake_binary_dir / "finance").touch()
         original_argv0 = sys.argv[0]
