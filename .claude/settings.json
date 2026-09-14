@@ -1,6 +1,25 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
+    "allow": [
+      "Bash(uv sync:*)",
+      "Bash(uv add:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run pyright:*)",
+      "Bash(uv run alembic upgrade:*)",
+      "Bash(uv run alembic revision:*)",
+      "Bash(uv run alembic current:*)",
+      "Bash(uv run alembic history:*)",
+      "Bash(docker compose -f deploy/compose.dev.yaml:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout -b:*)",
+      "Bash(git switch:*)"
+    ],
     "deny": [
       "Read(./**/*.pem)",
       "Read(./**/*.key)",
@@ -28,27 +47,7 @@
       "Bash(alembic downgrade:*)",
       "Bash(uv run alembic downgrade:*)",
       "Bash(gh pr merge:*)",
-      "Bash(dropdb:*)",
-      "Bash(psql:*)"
-    ],
-    "allow": [
-      "Bash(uv sync:*)",
-      "Bash(uv add:*)",
-      "Bash(uv run pytest:*)",
-      "Bash(uv run ruff:*)",
-      "Bash(uv run pyright:*)",
-      "Bash(uv run alembic upgrade:*)",
-      "Bash(uv run alembic revision:*)",
-      "Bash(uv run alembic current:*)",
-      "Bash(uv run alembic history:*)",
-      "Bash(docker compose -f deploy/compose.dev.yaml:*)",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git checkout -b:*)",
-      "Bash(git switch:*)"
+      "Bash(dropdb:*)"
     ]
   },
   "hooks": {

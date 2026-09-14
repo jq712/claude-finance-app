@@ -200,21 +200,30 @@ def test_finance_backup_cannot_advance_sequences(role_engine) -> None:
     "role",
     ["finance_owner", "finance_app", "finance_agent", "finance_observer", "finance_backup"],
 )
-def test_finance_migrator_is_a_member_of_every_managed_role(role_engine, role: str) -> None:
+def test_finance_migrator_inherits_privileges_of_every_managed_role(role_engine, role: str) -> None:
     """migrations/versions/0007_..._finance_migrator_role_membership.py:
-    without this membership, 0002_..._roles_and_grants.py's downgrade()
-    fails partway through its `DROP OWNED BY <role>` loop with a Postgres
-    permission-denied error — proven end-to-end by
-    tests/integration/test_migration_reversibility.py, which exercises
-    this via the alembic CLI's exit code. This test pins the same
-    invariant directly at the grant level, so a regression here fails
-    fast and readably instead of via a subprocess return-code assertion."""
+    on PG 16+, CREATEROLE automatically grants membership to the creator,
+    but WITHOUT the INHERIT option. Postgres's DROP OWNED BY requires
+    INHERIT privilege (has_privs_of_role), not just membership. 0002's
+    downgrade() runs `DROP OWNED BY <role>` for all five roles, and fails
+    at the first one (finance_owner) with "permission denied to drop
+    objects owned by it" without this grant setting INHERIT TRUE. This
+    test asserts the catalog row directly, which is superuser-independent
+    and discriminating (CI runs finance_migrator as a superuser, making
+    pg_has_role-based assertions vacuous). Proven end-to-end by
+    tests/integration/test_migration_reversibility.py via alembic CLI."""
     engine = role_engine("finance_migrator")
     with engine.connect() as conn:
-        is_member = conn.exec_driver_sql(
-            f"SELECT pg_has_role('finance_migrator', '{role}', 'member')"
+        has_inherit = conn.exec_driver_sql(
+            f"SELECT EXISTS ("
+            f"  SELECT 1 FROM pg_auth_members a "
+            f"  JOIN pg_roles r ON r.oid = a.roleid "
+            f"  JOIN pg_roles m ON m.oid = a.member "
+            f"  WHERE r.rolname = '{role}' AND m.rolname = 'finance_migrator' "
+            f"  AND a.inherit_option"
+            f")"
         ).scalar_one()
-    assert is_member, f"finance_migrator is not a member of {role}"
+    assert has_inherit, f"finance_migrator does not inherit privileges of {role}"
 
 
 def test_no_arbitrary_sql_tool_exists_in_the_agent_tool_registry() -> None:
