@@ -262,5 +262,8 @@ def get_settings() -> Settings:
     not mean a fresh connection pool every call — only a fresh read of
     what the DSN currently is.
     """
-    path, production_opt_in = resolve_env_file()
-    return Settings(_env_file=path, production_opt_in=production_opt_in)
+    path, _ = resolve_env_file()
+    # `_env_file` is BaseSettings' own documented per-instance override kwarg
+    # (pydantic_settings.main.BaseSettings.__init__); pyright's field-based
+    # __init__ synthesis for a BaseSettings subclass doesn't model it.
+    return Settings(_env_file=path)  # type: ignore[call-arg]
