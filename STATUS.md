@@ -10,14 +10,19 @@ Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode
 
 ## Last session
 
-**2026-09-15 — `docker-removal-audit` @ `3f4a7fa`**
+**2026-09-15 — `docker-removal-audit` @ `0438b0e`**
 
-- Landed: `## Git` section added to `AGENTS.md` + `CLAUDE.md` (gh PR/branch workflow,
-  merge via `.opencode/scripts/merge-class-a.sh`, and the "read STATUS.md at session start /
-  update `Last session` after each task" rules).
+- Landed:
+  - `## Git` section added to `AGENTS.md` + `CLAUDE.md` (`3f4a7fa`).
+  - Cherry-picked `835c63a` (ADR-019 Docker removal) as `9f9b7c2`: deletes `Dockerfile` +
+    `deploy/compose*.yaml`, replaces the Docker-shaped CI jobs with `release-preflight`.
+  - Fixed the two audit defects (`0438b0e`): `production-deploy` now `needs` every push-to-main job
+    (lint-and-typecheck, unit-tests, integration-tests, security-tests, secret-scan,
+    dependency-scan, release-preflight, agent-evals); `release-preflight`'s git-archive step runs
+    under `shell: bash` with `set -euo pipefail`.
 - Blocked: nothing.
-- Next command: `git cherry-pick 835c63a` (ADR-019 Docker removal) onto this branch, then fix its two
-  `ci.yml` defects (`production-deploy` needs list + `release-preflight` archive `pipefail`).
+- Next command: `.opencode/skills/pre-merge-review` (`code-reviewer`) over `9f9b7c2`..`0438b0e`,
+  then Class B `security-reviewer` + `qa-adversarial` before any PR to `main`.
 
 ## 1. What works now
 
@@ -195,15 +200,14 @@ until that database is cleaned up or the cluster is given a fresh volume.
 
 PR #15 is intentionally excluded — `CLAUDE.md` says not to touch it unless explicitly asked.
 
-**1. Land the Docker removal.** `milestone-7-ci-docker-removal` (§4.4) already does ADR-019's two
-remaining code-side rows (18 and 19): deletes `Dockerfile`/`deploy/compose.yaml`/
-`deploy/compose.dev.yaml`, redesigns the four Docker-shaped CI jobs. Audit `835c63a` line-by-line
-against current `origin/main` first — the worktree it lives in is a documented prior source of
-silent reverts — then push and open a PR. *Class B: rewrites CI and deletes the dev-environment
-definition; needs `security-reviewer` + `qa-adversarial`.*
-Files to read first: `docs/adr/ADR-019-bare-metal-no-docker-deployment.md` (status table +
-"Release flow"), `.github/workflows/ci.yml`, `deploy/compose.yaml`,
-`tests/unit/test_deploy_topology_regression.py`, `tests/conftest.py`, `docs/deployment.md`.
+**1. Land the Docker removal.** Cherry-picked `835c63a` onto `docker-removal-audit` (`9f9b7c2`) and
+fixed its two audit defects (`0438b0e`): `production-deploy` re-wired to gate on every push-to-main
+job, and `release-preflight`'s archive step now uses `shell: bash` + `set -euo pipefail`. Remaining:
+fresh-context code review, then Class B `security-reviewer` + `qa-adversarial`, then push the branch
+and open a PR. *Class B: rewrites CI and deletes the dev-environment definition.*
+Files to read first: `.github/workflows/ci.yml`, `docs/deployment.md`,
+`docs/adr/ADR-019-bare-metal-no-docker-deployment.md`, `tests/unit/test_deploy_topology_regression.py`,
+`tests/conftest.py`.
 
 **2. Write the bare-metal systemd units; wire `Settings.production_units`.** ADR-019's last
 "Not shipped" row. Rewrite `deploy/systemd/*.service` to invoke

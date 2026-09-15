@@ -126,3 +126,14 @@ Known completeness gaps to close in the same future PR (not addressed by `835c63
   The temporary hook stub is **not** committed. Pre-existing unrelated working-tree noise left
   untouched: `.gitignore` had an uncommitted `qa-pg/` line and an untracked
   `tmux-client-13198.log`.
+
+## Done this session (2026-09-15)
+
+- Cherry-picked `835c63a` onto `docker-removal-audit` (`9f9b7c2`) — Docker artifact removal
+  (`Dockerfile`, `deploy/compose*.yaml`) + `release-preflight` CI redesign.
+- Fixed the two audit defects from §5 on top (`0438b0e`): `production-deploy` now `needs` every
+  push-to-main job; `release-preflight`'s git-archive step runs under `shell: bash` with
+  `set -euo pipefail`.
+- `ruff format --check` + `ruff check` clean on the 7 touched Python test files. Full `pytest` not
+  run (shared-cluster `finance_ci_preflight` interference documented in STATUS.md §4.7).
+- No worktree, PR #15, database, or `/opt/finance` touched. Nothing pushed, no PR opened.
