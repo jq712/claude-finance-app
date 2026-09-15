@@ -252,7 +252,9 @@ jobs:
         # `finance selfcheck`'s installed_release_id silently report `None`,
         # still `overall: healthy` but no longer the same check release.sh's
         # own layout gets in production.
+        shell: bash
         run: |
+          set -euo pipefail
           release_dir="$RUNNER_TEMP/releases/${{ github.sha }}"
           mkdir -p "$release_dir"
           git archive --format=tar HEAD | tar -x -C "$release_dir"
@@ -303,7 +305,17 @@ jobs:
     # Environments -> production (docs/deployment.md); until that's done
     # this job runs unattended, which is fine pre-VPS but must be set
     # before it means anything for a real deploy.
-    needs: [release-preflight, agent-evals]
+    needs:
+      [
+        lint-and-typecheck,
+        unit-tests,
+        integration-tests,
+        security-tests,
+        secret-scan,
+        dependency-scan,
+        release-preflight,
+        agent-evals,
+      ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
