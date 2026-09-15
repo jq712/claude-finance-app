@@ -47,7 +47,7 @@ If the suspected compromise involves a credential (Plaid access token, a databas
 
 ## Class B: full gates, still autonomous
 
-A Class B fix still moves through the entire pipeline in `docs/deployment.md` — CI, migration-preflight, staging-smoke, critical agent evals, the `production` environment's manual-approval gate, then an owner-performed `finops deploy`. The difference from Class A is *who reviews it*: per CLAUDE.md's delegation rule, the subagent that implements a Class B change is never the one that approves it — `security-reviewer` and `qa-adversarial` run as separate invocations with their own context, and review-oriented subagents carry no write tools by design (`.claude/agents/`).
+A Class B fix still moves through the entire pipeline in `docs/deployment.md` — CI, release-preflight, critical agent evals, the `production` environment's manual-approval gate, then an owner-performed `deploy/scripts/release.sh` and `finops deploy`. The difference from Class A is *who reviews it*: per CLAUDE.md's delegation rule, the subagent that implements a Class B change is never the one that approves it — `security-reviewer` and `qa-adversarial` run as separate invocations with their own context, and review-oriented subagents carry no write tools by design (`.claude/agents/`).
 
 ## Rollback as an incident response tool
 

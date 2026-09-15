@@ -18,10 +18,11 @@ hardening:
   `RollbackTargetUnhealthyError` handler still interpolate the probe
   payload into a Rich markup string and crash with `MarkupError`.
 * QA-45 (Docker-era; superseded under ADR-019) — nothing pinned the
-  property QA-37's whole `wrong_image` fix rested on: that
-  `deploy/compose.yaml` never let `IMAGE_RELEASE_ID` be set at
-  container-start time. Under the bare-metal model there is no image and
-  no such variable at all — this invariant is now covered by an
+  property QA-37's whole `wrong_image` fix rested on: that the old
+  `deploy/compose.yaml` (removed under ADR-019) never let
+  `IMAGE_RELEASE_ID` be set at container-start time. Under the bare-metal
+  model there is no image and no such variable at all — this invariant is
+  now covered by an
   *executable* end-to-end test in `test_deploy_topology_baremetal.py`
   (a real `git archive` plus a real forged-`sys.argv[0]` attempt) rather
   than a static grep, which is strictly stronger. See that file's QA-45
@@ -53,11 +54,6 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.unit.test_deploy_topology_round4_regression import _run_wrapper_with_backup_key
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPOSE_FILE = _REPO_ROOT / "deploy" / "compose.yaml"
-_DOCKERFILE = _REPO_ROOT / "Dockerfile"
-_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 runner = CliRunner()
 

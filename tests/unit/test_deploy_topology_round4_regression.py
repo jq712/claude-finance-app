@@ -1,12 +1,17 @@
 """Adversarial regression tests for ADR-016's *round-2 fixes* themselves
 (QA round 4, Milestone 7 — handoff §19/§20, ADR-008, ADR-016).
 
-Round 2 fixed four things: the `migrate` compose command, `_do_rollback`'s
-unverified rollback target, `_parse_selfcheck_stdout`'s sentinel-key guard,
-and `with-production-env.sh`'s carriage-return rejection. Round 4 attacked
-each of those fixes directly and found that three of them stop one variant
-of the failure while leaving a neighbouring variant wide open, and that
-several of the tests written to cover them are structurally unable to fail:
+Round 2 fixed four things: the `migrate` compose command (ADR-019 removed
+`deploy/compose.yaml`/`Dockerfile` entirely, taking this file's former
+migrate-command and compose-vs-wrapper drift tests with them — nothing
+about the *service command* survives to test once there is no image or
+compose service to run it in), `_do_rollback`'s unverified rollback
+target, `_parse_selfcheck_stdout`'s sentinel-key guard, and
+`with-production-env.sh`'s carriage-return rejection. Round 4 attacked
+the surviving fixes directly and found that three of them stop one
+variant of the failure while leaving a neighbouring variant wide open,
+and that several of the tests written to cover them are structurally
+unable to fail:
 
 * `with-production-env.sh` rejects CR and LF but silently *strips* NUL
   bytes and silently keeps leading/trailing spaces — the same "credential
@@ -15,10 +20,9 @@ several of the tests written to cover them are structurally unable to fail:
 * `_parse_selfcheck_stdout` requiring both sentinel keys only closes the
   false-*negative* direction (healthy release misread as broken). The
   false-*positive* direction — moved to `test_deploy_topology_baremetal.py`
-  under ADR-019, since it's unrelated to this file's remaining Docker
-  Compose subject matter — is still open there too: the *last* line
-  carrying both keys wins, so any later lookalike object overrides the
-  real payload.
+  under ADR-019, since it's unrelated to this file's remaining subject
+  matter — is still open there too: the *last* line carrying both keys
+  wins, so any later lookalike object overrides the real payload.
 * `probe_release`'s wrong-release verdict was a tautology as originally
   deployed (also moved: `test_wrong_image_detection_is_not_a_tautology`,
   now rewritten under a new name in `test_deploy_topology_baremetal.py`
@@ -31,8 +35,7 @@ several of the tests written to cover them are structurally unable to fail:
 Defect tests are `xfail(strict=True)`, per the convention in
 `tests/integration/test_deploy_gate_regression.py`: delete the marker once
 fixed, never the test. Tests that pass are new guards for behavior that was
-correct but unpinned (the reverse credential-drift direction, the `migrate`
-service's command actually being runnable in the image).
+correct but unpinned.
 
 No Docker, no systemd, no real credentials: the shell tests execute the
 real scripts under `/bin/sh` against synthetic fixtures.
@@ -53,15 +56,9 @@ import pytest
 from finance_app.ops.status import _parse_selfcheck_stdout
 from tests.unit.test_deploy_topology_regression import (
     _CREDENTIAL_FILES,
-    _JOB_TO_SERVICE,
-    _credential_vars_referenced,
-    _service_blocks,
-    _wrapper_exports,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPOSE_FILE = _REPO_ROOT / "deploy" / "compose.yaml"
-_DOCKERFILE = _REPO_ROOT / "Dockerfile"
 _WRAPPER = _REPO_ROOT / "deploy" / "scripts" / "with-production-env.sh"
 _RESTORE_VERIFY_SCRIPT = _REPO_ROOT / "deploy" / "scripts" / "restore-verify.sh"
 
@@ -188,100 +185,6 @@ def test_wrapper_rejection_messages_never_echo_the_credential_value(
     assert "backup_encryption_key" in combined or "BACKUP_ENCRYPTION_KEY" in combined, (
         "a rejection must still name which credential failed, or the operator cannot act "
         f"on it: {combined!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Credential drift — the reverse direction the round-3 test never checked.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("job,service", sorted(_JOB_TO_SERVICE.items()))
-def test_no_job_exports_a_credential_its_compose_service_does_not_reference(
-    job: str, service: str
-) -> None:
-    """The existing drift test only asserts `referenced ⊆ exported` — that a
-    job is not *missing* a credential its service needs. Nothing asserted
-    the converse, so adding `BACKUP_ENCRYPTION_KEY` to the `finops` job (or
-    `PLAID_SECRET` to `migrate`) would keep every test in this repository
-    green while silently discarding ADR-016 D1's entire point: each job
-    holds only its own credentials.
-
-    Only `deploy` had the reverse direction pinned, and only against a
-    hardcoded forbidden list. This pins it for every job, derived from
-    compose.yaml rather than restated."""
-    block = _service_blocks(_COMPOSE_FILE.read_text())[service]
-    referenced = _credential_vars_referenced(block)
-    exported = _wrapper_exports(job)
-    extra = exported - referenced
-    assert not extra, (
-        f"with-production-env.sh job {job!r} exports {extra}, which deploy/compose.yaml's "
-        f"{service!r} service never references — ADR-016 D1 requires each job to hold only "
-        "its own credentials"
-    )
-
-
-# ---------------------------------------------------------------------------
-# The `migrate` service command — round-2 fix (a).
-# ---------------------------------------------------------------------------
-
-
-def _migrate_command() -> list[str]:
-    block = _service_blocks(_COMPOSE_FILE.read_text())["migrate"]
-    match = re.search(r"^    command:\s*(\[.*\])\s*$", block, flags=re.MULTILINE)
-    assert match, f"migrate service has no single-line `command:` list:\n{block}"
-    return json.loads(match.group(1))
-
-
-def test_migrate_service_command_actually_exists_in_the_image() -> None:
-    """Round 2 reverted this service from `python -m finance_app.db.migrate`
-    — a module ADR-016 D4 only *proposes* and that exists nowhere in
-    `src/` — back to `alembic upgrade head`. Nothing tested that, so the
-    broken command shipped in the first place and nothing stops it coming
-    back.
-
-    Asserts the command is runnable *in the image*, not just plausible: if
-    it invokes `python -m X`, `X` must resolve to a real module under
-    `src/`; if it invokes `alembic`, the Dockerfile must actually COPY
-    `alembic.ini` and `migrations/` into the image, and the compose service
-    must not override the `WORKDIR` the bare `alembic` CLI resolves
-    `alembic.ini` against."""
-    command = _migrate_command()
-    dockerfile = _DOCKERFILE.read_text()
-
-    if command[:2] == ["python", "-m"]:
-        module_path = _REPO_ROOT / "src" / Path(command[2].replace(".", "/"))
-        assert module_path.with_suffix(".py").exists() or (module_path / "__init__.py").exists(), (
-            f"deploy/compose.yaml's `migrate` service runs `python -m {command[2]}`, but that "
-            f"module does not exist under src/ — it would fail at the migration-preflight step "
-            "of every deploy (ADR-016 D4 proposes this module; it has not shipped)"
-        )
-        return
-
-    assert command[:1] == ["alembic"], f"unrecognized migrate command {command!r}"
-    assert re.search(r"^COPY alembic\.ini ", dockerfile, flags=re.MULTILINE), (
-        "`migrate` runs the bare `alembic` CLI, which resolves `alembic.ini` from the "
-        "process CWD, but the Dockerfile does not COPY alembic.ini into the image"
-    )
-    assert re.search(r"^COPY migrations/ ", dockerfile, flags=re.MULTILINE), (
-        "`migrate` runs `alembic`, but the Dockerfile does not COPY migrations/ into the image"
-    )
-    block = _service_blocks(_COMPOSE_FILE.read_text())["migrate"]
-    assert not re.search(r"^    working_dir:", block, flags=re.MULTILINE), (
-        "the `migrate` service overrides working_dir:, which moves the CWD the bare "
-        "`alembic` CLI looks for alembic.ini in away from the image's WORKDIR /app"
-    )
-
-
-def test_migrate_service_holds_only_the_migrator_dsn() -> None:
-    """Migration preflight runs with full DDL authority; it must not also
-    be handed the app/agent/Plaid/backup credentials while it has it."""
-    block = _service_blocks(_COMPOSE_FILE.read_text())["migrate"]
-    assert _credential_vars_referenced(block) == {"FINANCE_MIGRATOR_DB_PASSWORD"}
-    dsn_keys = set(re.findall(r"^      ([A-Z0-9_]*DATABASE_URL):", block, flags=re.MULTILINE))
-    assert dsn_keys == {"ALEMBIC_DATABASE_URL"}, (
-        f"the `migrate` service (full DDL authority) declares {dsn_keys}; it must hold "
-        "only ALEMBIC_DATABASE_URL"
     )
 
 

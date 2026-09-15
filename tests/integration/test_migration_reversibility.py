@@ -16,9 +16,10 @@ the roles migration regardless of what's added above it later.
 These tests are destructive to the dev database's role set (they actually
 drop and recreate finance_owner/finance_app/finance_agent/
 finance_observer/finance_backup) and shell out to the real `alembic` CLI
-against the container configured in `deploy/compose.dev.yaml`. They must
-run serially against a dev/CI database only — never anything with real
-data — and always leave the database back at head, even on failure.
+against a local dev Postgres instance or CI's Postgres service container
+(ADR-019 — no Docker Compose). They must run serially against a dev/CI
+database only — never anything with real data — and always leave the
+database back at head, even on failure.
 """
 
 import os
