@@ -137,3 +137,6 @@ Known completeness gaps to close in the same future PR (not addressed by `835c63
 - `ruff format --check` + `ruff check` clean on the 7 touched Python test files. Full `pytest` not
   run (shared-cluster `finance_ci_preflight` interference documented in STATUS.md §4.7).
 - No worktree, PR #15, database, or `/opt/finance` touched. Nothing pushed, no PR opened.
+- `code-reviewer` (Kimi-backed) dispatch failed with an `invalid_authentication_error` — the
+  mandated independent fresh-context review did not run. Both CI fixes were self-verified instead
+  (needs list matches `jobs:` keys; `shell: bash` + `set -euo pipefail` on the archive step).

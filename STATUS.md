@@ -20,9 +20,14 @@ Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode
     (lint-and-typecheck, unit-tests, integration-tests, security-tests, secret-scan,
     dependency-scan, release-preflight, agent-evals); `release-preflight`'s git-archive step runs
     under `shell: bash` with `set -euo pipefail`.
-- Blocked: nothing.
-- Next command: `.opencode/skills/pre-merge-review` (`code-reviewer`) over `9f9b7c2`..`0438b0e`,
-  then Class B `security-reviewer` + `qa-adversarial` before any PR to `main`.
+- Blocked: `code-reviewer` (Kimi-backed) dispatch failed — Kimi API key invalid/expired
+  (`invalid_authentication_error`). Independent fresh-context review is pending.
+- Self-check (not the mandated independent review): both CI fixes verified at `0438b0e` —
+  `production-deploy` `needs:` lists all 8 push-to-main jobs (names match `jobs:` keys exactly;
+  `docs-freshness` correctly excluded), and `release-preflight`'s archive step has `shell: bash` +
+  `set -euo pipefail`. `ruff format --check` + `ruff check` clean on the 7 touched Python test files.
+- Next command: retry `code-reviewer` once the Kimi key is fixed; then Class B `security-reviewer` +
+  `qa-adversarial` before any PR to `main`.
 
 ## 1. What works now
 
