@@ -2,7 +2,7 @@
 
 Owner-performed. **Rewritten 2026-09-13 for ADR-019** (bare-metal, no Docker) — supersedes this runbook's previous Docker Compose procedure. The engineering workspace and the production deployment share one VPS (ADR-007/ADR-010, revised the same date), but the Claude Code engineering session never performs any step in this document: it cannot read `/opt/finance` or its `.env`, and has no `sudo` — not because it lacks a network path (it's on the same box), but because `/opt/finance` is owned by a separate, more-privileged Unix user it is not a member of. Everything below happens as the owner, either at the console or over SSH into that same VPS. See `docs/deployment.md` for the release-sequence design this runbook implements and `docs/security-model.md` for the boundary this depends on.
 
-**Status as of 2026-09-13: none of this has been carried out yet.** No `/opt/finance`, no production Unix user, no `finance_prod` database exist on the VPS. This is the target procedure (ADR-019); a follow-up session builds the scripts this runbook references before it can actually be followed end to end.
+**Status as of 2026-09-13: none of this has been carried out yet.** No `/opt/finance`, no production Unix user, no `finance_prod` database exist on the VPS. This is the target procedure (ADR-019); `deploy/scripts/release.sh` (the release-copy step, §3 step 2 below) now exists, but provisioning itself is still owner-performed and has not been carried out.
 
 ## 1. Provision the host (one time)
 
@@ -14,9 +14,16 @@ Owner-performed. **Rewritten 2026-09-13 for ADR-019** (bare-metal, no Docker) �
    sudo chown -R finance-prod:finance-prod /opt/finance
    ```
    Confirm the engineering session's own Unix user (whatever user Claude Code sessions run as) is **not** a member of `finance-prod`'s group and cannot read `/opt/finance` — `sudo -u <engineering-user> ls /opt/finance` should fail with permission denied. Confirm that user also has no `sudo` entry and is not in the `systemd-journal` group (`docs/incident-response.md`). Re-run these checks periodically — permission drift here is a silent, total loss of the confidentiality boundary this whole setup relies on.
-3. Confirm `systemd-creds` is available if any credential will use it (`systemd-creds --version`; systemd ≥ 250) — optional hardening for a particularly sensitive value (the Plaid access token, the backup encryption key); the primary credential store is `/opt/finance/.env` below.
-4. `sudo systemctl daemon-reload` once the unit files (step 5 below) are in place.
-5. Copy the systemd unit files this repository defines for production processes/timers to `/etc/systemd/system/` — a deliberate, owner-performed sync, not something CI pushes automatically (ADR-007: no arbitrary PR code execution against `/opt/finance`). Re-run this step only when the unit definitions themselves change; ordinary application releases only change which release directory `current` points at.
+3. **Provision the bare mirror `deploy/scripts/release.sh` archives from** — production never reads the engineering checkout (a different Unix user owns it, and `git` would refuse it as a dubious-ownership repository anyway). As `finance-prod`:
+   ```
+   sudo -u finance-prod git init --bare /opt/finance/repo.git
+   sudo -u finance-prod git -C /opt/finance/repo.git remote add origin https://github.com/jq712/claude-finance-app.git
+   sudo -u finance-prod git -C /opt/finance/repo.git fetch --prune origin
+   ```
+   `git remote add` (not a plain `git clone --bare`, which sets up no remote-tracking refs at all) is what makes `refs/remotes/origin/main` resolve — `release.sh`'s provenance gate checks membership in its first-parent history. If the repository is private, `finance-prod` needs its own read-only credential configured for this remote before `fetch` will succeed — **use an SSH deploy key** (`ssh-keygen`, added as a read-only Deploy Key on the GitHub repo, with the remote URL in `git@github.com:...` form), never a token embedded in an `https://` URL: git's HTTP-transport error messages have historically included the URL, and a credential helper would otherwise leave a long-lived token sitting in `~finance-prod/.git-credentials` in plaintext — a credential location outside `/opt/finance/.env`'s mode-600 story and `docs/security-model.md`'s protected-material inventory entirely.
+4. Confirm `systemd-creds` is available if any credential will use it (`systemd-creds --version`; systemd ≥ 250) — optional hardening for a particularly sensitive value (the Plaid access token, the backup encryption key); the primary credential store is `/opt/finance/.env` below.
+5. `sudo systemctl daemon-reload` once the unit files (step 6 below) are in place.
+6. Copy the systemd unit files this repository defines for production processes/timers to `/etc/systemd/system/` — a deliberate, owner-performed sync, not something CI pushes automatically (ADR-007: no arbitrary PR code execution against `/opt/finance`). Re-run this step only when the unit definitions themselves change; ordinary application releases only change which release directory `current` points at.
 
 ## 2. Create the production environment file (one time, then per rotation)
 
@@ -44,19 +51,32 @@ A particularly sensitive value (the Plaid access token, the backup encryption ke
 ## 3. First deploy
 
 1. Confirm CI is green on `main` and note the commit SHA you intend to deploy (`git log -1 --format=%H`).
-2. Copy that git ref into a new release directory: `/opt/finance/releases/<sha>/` — as `finance-prod` (e.g. `sudo -u finance-prod git archive <sha> | sudo -u finance-prod tar -x -C /opt/finance/releases/<sha>`, or equivalent; the exact mechanism is a follow-up implementation decision, but it must run as `finance-prod`, never as the engineering session's user).
-3. Build the release's virtualenv: `cd /opt/finance/releases/<sha> && sudo -u finance-prod uv sync --locked --no-dev` (or however the follow-up session wires this).
-4. Back up `finance_prod` before touching it (`docs/backups.md`'s procedure, adapted to run directly against the host database).
-5. Run the migration: `alembic upgrade head` from the new release directory, using `/opt/finance/.env`'s `ALEMBIC_DATABASE_URL`.
-6. Point `current` at the new release: `sudo -u finance-prod ln -sfn /opt/finance/releases/<sha> /opt/finance/current`.
-7. `sudo systemctl enable --now` the production units and timers (names TBD by the follow-up session's unit files — analogous to the old `finance-app.service`/`finance-sync.timer`/`finance-backup.timer`/`finance-health.timer`/`finance-restore-drill.timer`, now invoking `/opt/finance/current/.venv/bin/finance`/`finops` directly instead of `docker compose run`).
-8. Verify: `finops health` / `finops version`, run as `finance-prod` against `/opt/finance/.env`.
+2. Copy that git ref into a new release directory and build its virtualenv — as `finance-prod`, using `deploy/scripts/release.sh` (§1 step 3 provisioned the bare mirror it archives from). On the very first deploy there is no `current` release tree to run the script from yet, so materialize it from the mirror **at the exact SHA being deployed** — never piped straight into `sh`, and never pulled from `origin/main`'s moving tip (that would run a different, unreviewed version of the script than the one belonging to the commit you're about to install):
+   ```
+   sudo -u finance-prod sh -c 'git -C /opt/finance/repo.git show <sha>:deploy/scripts/release.sh > /opt/finance/release.sh'
+   ```
+   Read `/opt/finance/release.sh` before running it — this script has full filesystem write access as `finance-prod`, so it deserves the same review weight as a migration, and every subsequent release's copy of it is what installs the *next* release. Then:
+   ```
+   sudo -u finance-prod sh /opt/finance/release.sh <sha>
+   ```
+   On every subsequent deploy, run the *current* release's own already-known-good, already-reviewed copy of the script instead of re-fetching from the mirror:
+   ```
+   sudo -u finance-prod /opt/finance/current/deploy/scripts/release.sh <sha>
+   ```
+   `release.sh` refuses (with no partial directory left behind) unless `<sha>` is on `origin/main`'s first-parent history — the commits CI's `push: branches: [main]` job actually evaluated, not merely everything reachable from `main`, which merge commits make a materially weaker claim — pass `--allow-unmerged` for a deliberate hotfix (this prints a loud warning; it is the sole gate in front of code execution as `finance-prod`, so treat it as an incident-adjacent action, not routine). It refuses to install a release whose extracted `RELEASE_ID` disagrees with its own name, which is the non-forgeable-identity check `ops/identity.py` depends on. It prints the exact `finops deploy` invocation for step 5 below when it succeeds.
+3. Back up `finance_prod` before touching it (`docs/backups.md`'s procedure, adapted to run directly against the host database).
+4. Run the migration: `alembic upgrade head` from the new release directory, using `/opt/finance/.env`'s `ALEMBIC_DATABASE_URL`.
+5. Point `current` at the new release: `sudo -u finance-prod ln -sfn /opt/finance/releases/<sha> /opt/finance/current`.
+6. `sudo systemctl enable --now` the production units and timers (names TBD by the follow-up session's unit files — analogous to the old `finance-app.service`/`finance-sync.timer`/`finance-backup.timer`/`finance-health.timer`/`finance-restore-drill.timer`, now invoking `/opt/finance/current/.venv/bin/finance`/`finops` directly instead of `docker compose run`).
+7. Verify: `finops health` / `finops version`, run as `finance-prod` against `/opt/finance/.env`.
 
-Steps 4–7 (backup gate, migration, symlink repoint, restart) are exactly what `FINANCE_ENV_FILE=/opt/finance/.env finops deploy <sha> --release-root /opt/finance` now automates, once steps 1–3 have put a real release directory in place and a successful backup is on record — `finops deploy` refuses rather than proceeding if either is missing. The manual sequence above is what it does internally, and remains the reference for diagnosing a failure or running the steps by hand.
+Steps 3–6 (backup gate, migration, symlink repoint, restart) are exactly what `FINANCE_ENV_FILE=/opt/finance/.env finops deploy <sha> --release-root /opt/finance` now automates, once step 2 has put a real release directory in place and a successful backup is on record — `finops deploy` refuses rather than proceeding if either is missing. The manual sequence above is what it does internally, and remains the reference for diagnosing a failure or running the steps by hand.
+
+Old release directories are never deleted automatically — `release.sh --prune --keep N` (default `N=5`) reclaims disk from old ones on request, refusing to remove whatever `current` points at or the release just installed. It has no way to read `ops.releases` bookkeeping (deliberately: reading it would mean holding a production DSN in a tool that only needs filesystem access), so it protects `current` and the newest few by mtime as a heuristic, not an exact match for "the release `finops rollback` would target" — check `finops rollback`'s intended target before pruning if in doubt.
 
 ## 4. Normal release (every subsequent deploy)
 
-Repeat steps 2–8 of §3 for the new SHA. The `current` repoint (step 6) plus a restart (step 7) is the entire "promote" action — no compose file edits, no image pulls, no registry.
+Repeat steps 2–7 of §3 for the new SHA (step 2 now runs `/opt/finance/current/deploy/scripts/release.sh <sha>`, not the mirror bootstrap — a `current` already exists). The `current` repoint (step 5) plus a restart (step 6) is the entire "promote" action — no compose file edits, no image pulls, no registry.
 
 ## 5. Rollback
 

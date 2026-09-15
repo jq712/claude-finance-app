@@ -95,6 +95,8 @@ this process's own `FINANCE_ENV_FILE` was explicitly set to a production env fil
 
 **As of 2026-09-13**, `finops deploy`/`rollback`/`restart` are rewritten for ADR-019's bare-metal
 symlink model (`src/finance_app/ops/host.py`, `src/finance_app/cli/finops.py`) — `docker compose`/
-`src/finance_app/ops/compose.py` no longer exist. Not yet shipped: the systemd unit files
-themselves (`finops deploy`/`restart` skip the `systemctl restart` step with a warning until
-`Settings.production_units` is configured) and the release-copy script.
+`src/finance_app/ops/compose.py` no longer exist. `finops deploy` still never copies a release
+into place itself — `deploy/scripts/release.sh <sha>` is what satisfies its installed-release
+precondition (see `docs/deployment.md`'s "Release-copy step"). Not yet shipped: the systemd unit
+files themselves (`finops deploy`/`restart` skip the `systemctl restart` step with a warning
+until `Settings.production_units` is configured).
