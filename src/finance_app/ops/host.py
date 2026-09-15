@@ -102,6 +102,7 @@ def run_release(
     release_path: str | Path,
     *args: str,
     env: dict[str, str] | None = None,
+    cwd: str | Path | None = None,
     timeout: float | None = None,
     runner: Runner = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
@@ -116,6 +117,23 @@ def run_release(
     narrow overlay a given invocation needs (e.g.
     `{"RELEASE_ID": release_id}`).
 
+    `cwd` defaults to `release_path` itself, never the caller's own working
+    directory. Without this, the child inherits whatever directory `finops`
+    happened to be invoked from — and `alembic upgrade head`/`finance
+    selfcheck` both resolve `alembic.ini` (and, through its
+    `script_location = %(here)s/migrations`, `migrations/`) relative to
+    their *own* cwd, not to `release_path`. Run from an operator's shell
+    with no `alembic.ini` there, `ops/status.py:migration_status` silently
+    degrades to `{"status": "unknown"}`, which `ops/selfcheck.py` folds into
+    `overall: "unhealthy"` — failing a perfectly good release's deploy
+    health gate for a reason that has nothing to do with the release. Run
+    from a *different* release's directory, it is worse: `alembic upgrade
+    head`'s migration preflight would silently apply the wrong release's
+    migrations. `release_path` is the one directory guaranteed to hold the
+    config and migrations that actually belong to the release being
+    probed/migrated (`ops/selfcheck.py`'s own docstring: "only the release
+    tree itself can answer that").
+
     `timeout` bounds the call so a hung release binary — e.g.
     `probe_release`'s one-shot selfcheck run against a release that never
     responds — cannot hang `finops deploy` indefinitely; a
@@ -125,7 +143,13 @@ def run_release(
     merged_env = {**os.environ, **(env or {})}
     try:
         return runner(
-            command, env=merged_env, text=True, capture_output=True, check=True, timeout=timeout
+            command,
+            env=merged_env,
+            cwd=str(cwd if cwd is not None else release_path),
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=timeout,
         )
     except subprocess.CalledProcessError as exc:
         raise HostCommandError(
