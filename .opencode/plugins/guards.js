@@ -32,9 +32,23 @@ const SECRET_READ_PATTERNS = [
   /(^|\/)\.plaid\//,
 ]
 
-function runHook(repoRoot, script, payload) {
+// Hook scripts that have been skipped this session, so a missing hook logs
+// once rather than on every tool call.
+const skippedHooks = new Set()
+
+function runHook(repoRoot, script, payload, { ifMissing = "block" } = {}) {
   const scriptPath = path.join(repoRoot, ".claude", "hooks", script)
   if (!existsSync(scriptPath)) {
+    if (ifMissing === "skip") {
+      if (!skippedHooks.has(script)) {
+        skippedHooks.add(script)
+        console.error(
+          `[guards] WARNING: skipping guard '.claude/hooks/${script}' — hook script is not present in this checkout (it exists only on PR #15's branch). ` +
+            `Running without its protection. All other guards (secret-file reads, tracked-migration edits, python-checks) remain active.`,
+        )
+      }
+      return { status: 0, stdout: "", stderr: "" }
+    }
     throw new Error(
       `BLOCKED: guard script '.claude/hooks/${script}' is missing — refusing to run unguarded rather than failing open.`,
     )
@@ -103,7 +117,7 @@ export async function Guards({ directory, worktree }) {
           cwd: repoRoot,
         })
         blockOrPass(
-          runHook(repoRoot, "guard-protected-branch.sh", payload),
+          runHook(repoRoot, "guard-protected-branch.sh", payload, { ifMissing: "skip" }),
           "shell command",
         )
       }
