@@ -1,7 +1,7 @@
 ---
 description: Security review against this project's specific invariants — secret handling, agent tool permissions, SQL grants, prompt injection surfaces, webhook validation, log sanitization, container and network exposure. MUST be used before any Class B change merges. Read-only by design.
 mode: subagent
-model: kimi-for-coding/k3
+model: moonshotai/kimi-k3
 permission:
   edit: deny
   write: deny

@@ -10,24 +10,19 @@ Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode
 
 ## Last session
 
-**2026-09-15 — `docker-removal-audit` @ `0438b0e`**
+**2026-09-15 — `docker-removal-audit` @ `32d0d23`**
 
-- Landed:
-  - `## Git` section added to `AGENTS.md` + `CLAUDE.md` (`3f4a7fa`).
-  - Cherry-picked `835c63a` (ADR-019 Docker removal) as `9f9b7c2`: deletes `Dockerfile` +
-    `deploy/compose*.yaml`, replaces the Docker-shaped CI jobs with `release-preflight`.
-  - Fixed the two audit defects (`0438b0e`): `production-deploy` now `needs` every push-to-main job
-    (lint-and-typecheck, unit-tests, integration-tests, security-tests, secret-scan,
-    dependency-scan, release-preflight, agent-evals); `release-preflight`'s git-archive step runs
-    under `shell: bash` with `set -euo pipefail`.
-- Blocked: `code-reviewer` (Kimi-backed) dispatch failed — Kimi API key invalid/expired
-  (`invalid_authentication_error`). Independent fresh-context review is pending.
-- Self-check (not the mandated independent review): both CI fixes verified at `0438b0e` —
-  `production-deploy` `needs:` lists all 8 push-to-main jobs (names match `jobs:` keys exactly;
-  `docs-freshness` correctly excluded), and `release-preflight`'s archive step has `shell: bash` +
-  `set -euo pipefail`. `ruff format --check` + `ruff check` clean on the 7 touched Python test files.
-- Next command: retry `code-reviewer` once the Kimi key is fixed; then Class B `security-reviewer` +
-  `qa-adversarial` before any PR to `main`.
+- Landed: reviewer agent model pins moved from `kimi-for-coding/k3` to `moonshotai/kimi-k3` in
+  `.opencode/agents/code-reviewer.md`, `security-reviewer.md`, `qa-adversarial.md`. DeepSeek pins
+  (`opencode.json`, `AGENTS.md`) and the app runtime `AGENT_PROVIDER` are unchanged; no other agents
+  touched. A repo-wide md/json search found no other file naming these agents beside a model id.
+- Prior session (carried): `## Git` section added to `AGENTS.md` + `CLAUDE.md` (`3f4a7fa`);
+  ADR-019 Docker removal cherry-picked (`9f9b7c2`); Docker-removal CI fixes at `0438b0e`
+  (`production-deploy` `needs` all 8 push-to-main jobs; `release-preflight` archive step
+  `shell: bash` + `set -euo pipefail`). `code-reviewer` dispatch was blocked on an invalid/expired
+  Kimi API key (`invalid_authentication_error`).
+- Next command: retry `code-reviewer` (now pinned to `moonshotai/kimi-k3`); then Class B
+  `security-reviewer` + `qa-adversarial` before any PR to `main`.
 
 ## 1. What works now
 
