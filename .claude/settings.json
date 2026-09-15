@@ -1,33 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
-    "deny": [
-      "Read(./**/*.pem)",
-      "Read(./**/*.key)",
-      "Read(./.env)",
-      "Read(./.env.local)",
-      "Read(./.env.development)",
-      "Read(./.env.staging)",
-      "Read(./.env.production)",
-      "Read(./secrets/**)",
-      "Read(//etc/finance/**)",
-      "Read(//etc/credstore*/**)",
-      "Read(~/.plaid/**)",
-      "Bash(ssh:*)",
-      "Bash(scp:*)",
-      "Bash(rsync:*)",
-      "Bash(systemd-creds:*)",
-      "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
-    ],
-    "ask": [
-      "Bash(docker compose -f deploy/compose.prod.yaml:*)",
-      "Bash(alembic downgrade:*)",
-      "Bash(uv run alembic downgrade:*)",
-      "Bash(gh pr merge:*)",
-      "Bash(dropdb:*)",
-      "Bash(psql:*)"
-    ],
     "allow": [
       "Bash(uv sync:*)",
       "Bash(uv add:*)",
@@ -46,6 +19,35 @@
       "Bash(git commit:*)",
       "Bash(git checkout -b:*)",
       "Bash(git switch:*)"
+    ],
+    "deny": [
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.development)",
+      "Read(./.env.staging)",
+      "Read(./.env.production)",
+      "Read(./secrets/**)",
+      "Read(//etc/finance/**)",
+      "Read(//etc/finance-app/**)",
+      "Read(//etc/credstore*/**)",
+      "Read(~/.plaid/**)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)",
+      "Bash(systemd-creds:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ],
+    "ask": [
+      "Bash(docker compose -f deploy/compose.yaml:*)",
+      "Bash(deploy/scripts/finops.sh:*)",
+      "Bash(deploy/scripts/with-production-env.sh:*)",
+      "Bash(alembic downgrade:*)",
+      "Bash(uv run alembic downgrade:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(dropdb:*)"
     ]
   },
   "hooks": {

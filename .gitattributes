@@ -1,0 +1,7 @@
+# `RELEASE_ID` is a placeholder (`$Format:%H$`) that `git archive`
+# substitutes with the real commit SHA at archive time — the mechanism
+# `ops/identity.py` relies on for a non-forgeable release identity
+# (ADR-019). A plain checkout never substitutes it, so a dev tree can
+# never impersonate an archived release. See ops/identity.py's module
+# docstring.
+RELEASE_ID export-subst

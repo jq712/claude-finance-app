@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic aggregate health check (ADR-011)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

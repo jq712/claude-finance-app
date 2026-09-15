@@ -58,11 +58,30 @@ jobs:
     env:
       DATABASE_URL: postgresql+psycopg://finance_app:devpassword@localhost:5433/finance_dev
       ALEMBIC_DATABASE_URL: postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev
+      BACKUP_DATABASE_URL: postgresql+psycopg://finance_backup:devpassword@localhost:5433/finance_dev
+      BACKUP_ENCRYPTION_KEY: ci-test-passphrase-not-a-real-secret
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      # postgresql-client-17, matching the service container above and
+      # deploy/compose.yaml's postgres:17 — pg_dump/pg_restore version
+      # skew is not reliably supported in the newer-server direction
+      # (docs/backups.md), and ubuntu-latest's default `postgresql-client`
+      # is not necessarily major version 17. gnupg is already preinstalled
+      # on ubuntu-latest but declared explicitly for clarity. Mirrors the
+      # Dockerfile's runtime-stage install — see that file for why each
+      # package is here.
+      - name: install postgresql-client-17 and gnupg (for tests/integration/test_ops_backup.py)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc > /dev/null
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-17 gnupg
       - run: uv sync --locked
       - run: uv run alembic upgrade head
       - run: uv run pytest tests/integration -v -m integration
@@ -145,3 +164,255 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docs-freshness:
+    # A PR into `main` whose title or branch name identifies it as
+    # completing/advancing a Milestone (the convention every Milestone 0-6
+    # PR and this repo's branch names follow) must move README.md's Status
+    # line in the same PR. This exists because it already happened once
+    # for real: the Milestone 6 PR merged without touching README, which
+    # kept claiming "Milestone 5 complete" through all of Milestone 6 and
+    # well into Milestone 7 (CLAUDE.md/handoff §31 Definition of Done,
+    # handoff §27's "docs as durable memory"). Scoped to base == main
+    # because that is the moment a milestone actually lands and README's
+    # status becomes wrong if untouched — mid-milestone implementation PRs
+    # into a `milestone-N-*` integration branch inherit "milestone" in
+    # their branch names without completing anything (PR #13 was the false
+    # positive that proved it). Cheap, heuristic, and intentionally
+    # narrow; it is not a general "are the docs stale" check.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: README Status line must move with a milestone PR
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if printf '%s\n%s\n' "$PR_TITLE" "$PR_BRANCH" | grep -qiE '(^|[^0-9])milestone[ _-]?[0-9]+'; then
+            if ! git diff --name-only "$BASE_SHA"...HEAD | grep -qx 'README.md'; then
+              echo "::error::This PR's title or branch name references a Milestone but does not update README.md. Update README.md's Status line in this PR (CLAUDE.md / handoff §31 Definition of Done) — or, if the milestone genuinely isn't complete yet, note that in the PR description; this check only looks for any README.md change, not a specific wording."
+              exit 1
+            fi
+          fi
+
+  container-build:
+    # Milestone 7 (handoff §18, §29): every PR proves the image still
+    # builds. Never pushes anywhere — that only happens from `main`, in
+    # publish-image below, after every gating job on this page is green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t finance-app:ci .
+
+  dependency-scan:
+    # handoff §18 requires dependency scanning in CI; nothing did this
+    # anywhere in the repo before this job. pip-audit against the exact
+    # locked dependency set (uv.lock), run in an isolated `uvx`
+    # environment so a vulnerable transitive dependency in the scan tool
+    # itself can't taint this project's own resolved environment.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv export --locked --no-dev --no-hashes -o requirements.txt
+      - run: uvx pip-audit --requirement requirements.txt
+
+  # --------------------------------------------------------------------
+  # CD (handoff §19, ADR-007, ADR-008): everything below this line runs
+  # only on a push to `main`, only after every job above is green, and
+  # only in this order. It is one pipeline, not a second workflow, so
+  # "after CI is green" is an ordinary `needs:` edge rather than a
+  # cross-workflow `workflow_run` dependency.
+  # --------------------------------------------------------------------
+
+  publish-image:
+    needs:
+      [
+        lint-and-typecheck,
+        unit-tests,
+        integration-tests,
+        security-tests,
+        secret-scan,
+        dependency-scan,
+        container-build,
+      ]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tagged by immutable Git SHA — the canonical release id `finops
+          # deploy`/`finops rollback` operate on (ADR-008). `latest` is
+          # published too, as a convenience for a first manual bring-up
+          # before any release has been deployed, but it is never the sole
+          # identifier and `finops deploy` refuses anything that isn't a
+          # Git SHA (src/finance_app/cli/finops.py's `_RELEASE_ID_RE`).
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+          # QA-37: bakes the image's build-time identity (Dockerfile `ARG
+          # RELEASE_ID` -> `ENV IMAGE_RELEASE_ID`) to the same Git SHA it's
+          # tagged with, so `ops.status.probe_release`'s `wrong_image`
+          # check has a value to compare that the running container itself
+          # carries, not one echoed back from the environment the check
+          # injected.
+          build-args: |
+            RELEASE_ID=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  migration-preflight:
+    # ADR-008: "migrations must be forward-compatible ... or rollback is a
+    # lie." Proves the *packaged image* (not just the checked-out source —
+    # integration-tests already covers that) applies cleanly on top of the
+    # schema the *previously published* release actually has, not just a
+    # fresh empty database (finding/QA-17 — a migration that only works
+    # from nothing can still break a real upgrade-in-place; a fresh DB
+    # can't catch that).
+    needs: publish-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: finance_migrator
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: finance_dev
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U finance_migrator -d finance_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # HEAD~1 -- the commit main pointed at before this push -- is
+          # this job's proxy for "the release currently in production".
+          # `main` is merge-only per CLAUDE.md's working agreements, so
+          # this is a reasonable approximation without querying anything
+          # ADR-007 would forbid (no read access to the production host).
+          fetch-depth: 2
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: apply the previously-published release's migrations first
+        run: |
+          PREV_SHA="$(git rev-parse HEAD~1)"
+          if docker pull "ghcr.io/${{ github.repository }}:${PREV_SHA}"; then
+            docker run --rm --network host \
+              -e ALEMBIC_DATABASE_URL=postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev \
+              "ghcr.io/${{ github.repository }}:${PREV_SHA}" \
+              alembic upgrade head
+          else
+            echo "no previously-published image for ${PREV_SHA} (e.g. this is the first release on main) -- skipping the previous-schema step, falling through to the fresh-database check below"
+          fi
+      - name: alembic upgrade head, from inside the packaged image
+        run: |
+          docker run --rm --network host \
+            -e ALEMBIC_DATABASE_URL=postgresql+psycopg://finance_migrator:devpassword@localhost:5433/finance_dev \
+            ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            alembic upgrade head
+
+  staging-smoke:
+    # No real staging host exists yet (see production-deploy below), so
+    # "staging" here is the full `deploy/compose.yaml` topology brought up
+    # on the runner with the just-published image and synthetic
+    # credentials — proving the compose file, the image, and the
+    # migration/health path work together end to end, which is exactly
+    # what a staging deploy exists to prove before touching production.
+    needs: migration-preflight
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CONTAINER_IMAGE_REPO: ghcr.io/${{ github.repository }}
+      RELEASE_ID: ${{ github.sha }}
+      FINANCE_MIGRATOR_DB_PASSWORD: devpassword
+      FINANCE_APP_DB_PASSWORD: devpassword
+      FINANCE_AGENT_DB_PASSWORD: devpassword
+      FINANCE_OBSERVER_DB_PASSWORD: devpassword
+      FINANCE_BACKUP_DB_PASSWORD: devpassword
+      # Sandbox-shaped placeholders — smoke tests boot/health/migration
+      # status, never a real Plaid/model call (that's agent-evals, a
+      # separate required check below).
+      PLAID_CLIENT_ID: smoke-test-placeholder
+      PLAID_SECRET: smoke-test-placeholder
+      PLAID_ACCESS_TOKEN: smoke-test-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker compose -f deploy/compose.yaml up -d postgres
+      - name: wait for postgres
+        run: |
+          until docker compose -f deploy/compose.yaml exec -T postgres pg_isready -U finance_migrator -d finance; do
+            sleep 2
+          done
+      - run: docker compose -f deploy/compose.yaml --profile migrate run --rm -T migrate
+      - name: finops health (must exit 0)
+        run: docker compose -f deploy/compose.yaml --profile finops run --rm -T finops finops health --json
+      - run: docker compose -f deploy/compose.yaml run --rm -T app finance status
+      - if: always()
+        run: docker compose -f deploy/compose.yaml down -v
+
+  production-deploy:
+    # No production VPS exists yet (handoff §29 Milestone 7 is building
+    # the deployable artifacts, not operating a live host — see this PR's
+    # description). This job is therefore intentionally a documented
+    # no-op gate, not a faked deploy target: it records that the release
+    # is built, migration-preflighted, staging-smoke-tested, and
+    # eval-clean, and tells the owner the one remaining step is theirs.
+    #
+    # `environment: production` is the actual gate — configure this
+    # environment's required reviewers once in GitHub repo Settings ->
+    # Environments -> production (docs/deployment.md); until that's done
+    # this job runs unattended, which is fine pre-VPS but must be set
+    # before it means anything for a real deploy.
+    needs: [staging-smoke, agent-evals]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: record release readiness
+        run: |
+          {
+            echo "## Release ready: \`${{ github.sha }}\`"
+            echo
+            echo "\`ghcr.io/${{ github.repository }}:${{ github.sha }}\` passed CI, was published to GHCR, migration-preflighted, staging-smoke-tested, and (if provider credentials are configured) critical agent evals."
+            echo
+            echo "**No production VPS is provisioned yet.** Per ADR-007/ADR-010, this pipeline never SSHes into or deploys onto a host on its own — the owner runs \`finops deploy ${{ github.sha }}\` on the VPS once it exists. See docs/deployment.md and docs/runbooks/deploy.md for the exact provisioning and first-deploy procedure."
+          } >> "$GITHUB_STEP_SUMMARY"

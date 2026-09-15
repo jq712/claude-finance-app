@@ -1,0 +1,33 @@
+[Unit]
+Description=finance-app: aggregate health check (handoff §10, §23)
+Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/deployment.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/finance-app
+
+# See finance-app.service for rationale -- same sandboxing profile for
+# this unit's `docker compose`/health-check invocation.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Uses finance_app (not finance_observer) — see ops/health.py's module
+# docstring: this unit's `check_health()` writes an ops.errors row on
+# failure, which finance_observer cannot do. ADR-016 D1: trimmed to
+# exactly the `health` job's set — no longer decrypts the Plaid
+# production access token, any model provider key, the migrator
+# password, the observer password, or the backup password.
+LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
+EnvironmentFile=-/etc/finance-app/env
+
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh health -- docker compose -f /opt/finance-app/deploy/compose.yaml --profile app run --rm -T app python -m finance_app.ops.health
+
+TimeoutStartSec=120

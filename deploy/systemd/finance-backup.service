@@ -1,0 +1,31 @@
+[Unit]
+Description=finance-app: encrypted PostgreSQL backup (handoff §22, ADR-015)
+Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/backups.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/finance-app
+
+# See finance-app.service for rationale -- same sandboxing profile for
+# this unit's `docker compose`/backup.sh invocation.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# ADR-016 D1: trimmed to exactly the `backup` job's set.
+LoadCredentialEncrypted=finance_backup_db_password:/etc/finance-app/credentials/finance_backup_db_password.cred
+LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
+LoadCredentialEncrypted=backup_encryption_key:/etc/finance-app/credentials/backup_encryption_key.cred
+EnvironmentFile=-/etc/finance-app/env
+
+Environment=COMPOSE_FILE=/opt/finance-app/deploy/compose.yaml
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh backup -- /opt/finance-app/deploy/scripts/backup.sh
+
+TimeoutStartSec=600

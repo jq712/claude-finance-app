@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -7,7 +8,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from finance_app.config.settings import get_settings
 
 _engine: Engine | None = None
+_engine_dsn_fingerprint: str | None = None
 _sessionmaker: sessionmaker[Session] | None = None
+
+
+def _fingerprint(dsn: str) -> str:
+    """A hash of the DSN, not the DSN itself — comparing `str(engine.url)`
+    would mask the password and treat two DSNs differing only by password
+    as equal, defeating the point of noticing the DSN changed."""
+    return hashlib.sha256(dsn.encode()).hexdigest()
 
 
 def get_engine() -> Engine:
@@ -17,17 +26,30 @@ def get_engine() -> Engine:
     to run migrations (that's `finance_migrator`, via `alembic`) and never
     used by the runtime agent's tool layer (that's `finance_agent`, via its
     own connection — see agent/tools/).
-    """
-    global _engine
-    if _engine is None:
-        _engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+
+    Rebuilds automatically if `get_settings().database_url` has changed
+    since the last call (ADR-019: `get_settings()` is deliberately
+    uncached, e.g. a test flips `FINANCE_ENV_FILE` mid-process — a module
+    global that cached the *first* engine forever would silently keep
+    talking to the old database after that)."""
+    global _engine, _engine_dsn_fingerprint
+    dsn = get_settings().database_url.get_secret_value()
+    fingerprint = _fingerprint(dsn)
+    if _engine is None or fingerprint != _engine_dsn_fingerprint:
+        if _engine is not None:
+            _engine.dispose()
+        _engine = create_engine(dsn, pool_pre_ping=True)
+        _engine_dsn_fingerprint = fingerprint
+        global _sessionmaker
+        _sessionmaker = None
     return _engine
 
 
 def get_sessionmaker() -> sessionmaker[Session]:
     global _sessionmaker
+    engine = get_engine()  # may rebuild _sessionmaker as a side effect
     if _sessionmaker is None:
-        _sessionmaker = sessionmaker(bind=get_engine(), expire_on_commit=False)
+        _sessionmaker = sessionmaker(bind=engine, expire_on_commit=False)
     return _sessionmaker
 
 
@@ -45,10 +67,11 @@ def dispose_engine() -> None:
     tests/integration/test_migration_reversibility.py, which calls this
     after restoring migrations to head).
     """
-    global _engine, _sessionmaker
+    global _engine, _engine_dsn_fingerprint, _sessionmaker
     if _engine is not None:
         _engine.dispose()
     _engine = None
+    _engine_dsn_fingerprint = None
     _sessionmaker = None
 
 

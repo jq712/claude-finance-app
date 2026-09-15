@@ -1,0 +1,37 @@
+[Unit]
+Description=finance-app: daily Plaid transaction sync (mandatory reconciliation, ADR-012)
+Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/plaid-sync.md
+After=docker.service finance-app.service
+Requires=docker.service
+# Runs its own one-shot `docker compose run` against the already-running
+# `postgres` service (finance-app.service brings up `postgres` only,
+# ADR-016 D2) — ordering after it keeps the common case (both enabled)
+# predictable.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/finance-app
+
+# See finance-app.service for rationale -- same sandboxing profile for
+# this unit's `docker compose`/sync invocation.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# ADR-016 D1: trimmed to exactly the `sync` job's set — no longer
+# decrypts the backup encryption key or the migrator password (this timer
+# never runs a migration or a backup).
+LoadCredentialEncrypted=plaid_client_id:/etc/finance-app/credentials/plaid_client_id.cred
+LoadCredentialEncrypted=plaid_secret:/etc/finance-app/credentials/plaid_secret.cred
+LoadCredentialEncrypted=plaid_access_token:/etc/finance-app/credentials/plaid_access_token.cred
+LoadCredentialEncrypted=finance_app_db_password:/etc/finance-app/credentials/finance_app_db_password.cred
+EnvironmentFile=-/etc/finance-app/env
+
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh sync -- docker compose -f /opt/finance-app/deploy/compose.yaml --profile sync run --rm -T sync
+
+TimeoutStartSec=600

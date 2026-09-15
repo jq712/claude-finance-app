@@ -31,7 +31,7 @@ def test_core_tables_exist_in_expected_schemas(migrator_engine) -> None:
             },
             "finance": {"budgets"},
             "agent": {"conversations", "messages", "analysis_runs", "tool_calls"},
-            "ops": {"job_runs", "sync_runs", "errors"},
+            "ops": {"job_runs", "sync_runs", "errors", "backup_runs", "releases"},
         }
         for schema, tables in expected.items():
             actual = set(inspector.get_table_names(schema=schema))
@@ -41,7 +41,9 @@ def test_core_tables_exist_in_expected_schemas(migrator_engine) -> None:
 def test_alembic_is_at_a_known_head(migrator_engine) -> None:
     with migrator_engine.connect() as conn:
         version = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-    assert version == "715521e125d4"
+    # Migration 0007 (finance_migrator role privilege inheritance) is the
+    # current head; update this when the next migration lands.
+    assert version == "adf7ab9c5af2"
 
 
 def test_migrator_dsn_matches_the_role_that_ran_migrations() -> None:

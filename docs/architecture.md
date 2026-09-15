@@ -4,14 +4,15 @@ Derived from `CLAUDE_FINANCE_APP_HANDOFF.md`. When implementation diverges from 
 
 ## Shape
 
-A modular monolith. One Python application, one PostgreSQL database, one Linux VPS. Scheduling lives in systemd timers rather than inside a long-running application scheduler, so a crashed process cannot silently stop the daily sync.
+A modular monolith. One Python application, one PostgreSQL instance (`finance_dev`/`finance_prod` as separate logical databases on it — ADR-019), one Linux VPS shared by the engineering workspace and production (ADR-007/ADR-010/ADR-019, revised 2026-09-13). Scheduling lives in systemd timers rather than inside a long-running application scheduler, so a crashed process cannot silently stop the daily sync.
 
 ```
                      Private Git Repository
                               |
                         GitHub Actions
                               |
-                  immutable image (tagged by SHA)
+        known git ref, copied to /opt/finance/releases/<sha>
+                  (ADR-019, revised 2026-09-13 — no Docker)
                               |
                               v
 +----------------------------------------------------------------+
@@ -107,7 +108,7 @@ This is why there is no in-place category column on the raw table, and why the `
 
 ## Deployment
 
-Git is the source of truth. Code reaches production only as an immutable image tagged by Git SHA, via CI → staging → smoke tests → critical evals → production → post-deploy health checks → automatic rollback on defined failure. Current and previous known-good releases are always tracked. There is no editing on the VPS and no self-hosted runner on it.
+Git is the source of truth. Code reaches production only as a known, CI-green git ref copied into `/opt/finance/releases/<sha>/` (ADR-019, revised 2026-09-13 — no Docker, no image, supersedes ADR-016's image-based design), via CI → staging → smoke tests → critical evals → production → post-deploy health checks → automatic rollback on defined failure. Current and previous known-good releases are always tracked, via a `current` symlink rather than an image tag. There is no editing `/opt/finance` directly, and no self-hosted CI runner on the VPS. The engineering workspace and the production deployment share that VPS (ADR-007/ADR-010, revised 2026-09-13) — see `docs/security-model.md`'s "Trust boundaries" for what separates them now that it isn't a separate host.
 
 ## Deliberate omissions
 

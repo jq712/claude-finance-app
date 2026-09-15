@@ -30,7 +30,7 @@ analytics-function figure for the same period are always identical by constructi
 ## `status` degrades gracefully without a database
 
 `finance status` is the one command that must stay useful when the rest of the stack isn't up
-(e.g. `docker compose` hasn't been started yet) — it's the first thing to run when diagnosing
+(e.g. the database isn't reachable yet) — it's the first thing to run when diagnosing
 "why doesn't `finance` work." It always exits 0: on a database error it prints
 `database unavailable: ...` and stops, rather than raising. Every other command requires a
 reachable database and will exit non-zero on connection failure, since there is nothing useful
@@ -53,3 +53,48 @@ transaction," not one per command.
 2. Reuse `_resolve_period()` for any command that takes `--month`.
 3. Add both a unit test (argument parsing, `status` without a database) and an integration test
    against the golden dataset (`tests/integration/test_cli.py`), matching the existing pattern.
+
+## `finops` (Milestone 7) — the production operations interface
+
+A second, separate entrypoint (`src/finance_app/cli/finops.py`) — not a subcommand of `finance`
+— because its authority is different: `finance` is the user-facing app; `finops` is the narrow
+diagnostic/deployment surface handoff §10 requires so autonomous engineering agents never need
+`psql`/shell/SSH against production. See `docs/deployment.md` for the full design and ADR-019
+for the bare-metal design this table now describes (**no Docker**, revised 2026-09-13 — supersedes
+the Compose-based mechanism in the "Connects as" column below where it once said `docker compose`).
+
+| Command | Purpose | Connects as |
+| --- | --- | --- |
+| `finops version [--json]` | App version + running release id | none (reads in-process version string + release id; no DB connection) |
+| `finops health [--json]` | Aggregate database/migration/sync/backup health; exits non-zero if unhealthy | `finance_observer` |
+| `finops sync-status [--json]` | Most recent Plaid sync run and cursor state | `finance_observer` |
+| `finops db-status [--json]` | Database reachability | `finance_observer` |
+| `finops migration-status [--json]` | Applied Alembic revision vs. repo head | `finance_observer` |
+| `finops backup-status [--json]` | Most recent backup and whether it's restore-verified | `finance_observer` |
+| `finops recent-errors [--limit N] [--json]` | Recent sanitized `ops.errors` rows | `finance_observer` |
+| `finops restart` | Re-runs `finance selfcheck` against the release `/opt/finance/current` points at and reports whether it's still healthy. Never changes `current`. | `finance_observer` (read current release) |
+| `finops deploy <sha>` | Confirm/copy the release directory, migrate, health-check, promote-or-auto-rollback (ADR-008's principle, ADR-019's mechanism) | `finance_app` (write) |
+| `finops rollback` | Repoint `current` at the tracked previous release directory and restart | `finance_app` (write) |
+
+Every read command connects as `finance_observer` — strictly read-only, never a financial
+payload in the output (`src/finance_app/ops/db.py`). `deploy`/`rollback` are the only commands
+that change production state, and they do so narrowly: a `current`-symlink repoint plus a
+`systemctl restart` of the production units, plus a bookkeeping row (`src/finance_app/ops/release.py`,
+conceptually unchanged from the Docker design — it only ever tracked release identifiers and
+status, never anything Docker-specific; only its `image_ref` column was renamed to `artifact_ref`).
+None of them accept a SQL string, a shell string, or an arbitrary command — see
+`docs/deployment.md` and `docs/runbooks/deploy.md` for exactly how `deploy`/`rollback`/`restart`
+operate in production.
+
+All three write commands also accept `--release-root PATH` (default `Settings.release_root`,
+`/opt/finance`) — the same seam that makes them unit-testable against a `tmp_path` with no
+`/opt/finance` and no root anywhere in the process. Passing it explicitly at anything other than
+the production default is also the only way to bypass `config/settings.py`'s explicit-prod-opt-in
+guard's release-root check; pointed at `/opt/finance` itself, a command refuses (exit 2) unless
+this process's own `FINANCE_ENV_FILE` was explicitly set to a production env file.
+
+**As of 2026-09-13**, `finops deploy`/`rollback`/`restart` are rewritten for ADR-019's bare-metal
+symlink model (`src/finance_app/ops/host.py`, `src/finance_app/cli/finops.py`) — `docker compose`/
+`src/finance_app/ops/compose.py` no longer exist. Not yet shipped: the systemd unit files
+themselves (`finops deploy`/`restart` skip the `systemctl restart` step with a warning until
+`Settings.production_units` is configured) and the release-copy script.

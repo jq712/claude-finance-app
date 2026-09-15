@@ -18,7 +18,15 @@ if config.config_file_name is not None:
 # Migrations run DDL and create roles, so they connect as the bootstrap
 # `finance_migrator` role, not the least-privilege runtime `finance_app`
 # role settings.database_url points at. See config/settings.py.
-config.set_main_option("sqlalchemy.url", get_settings().alembic_database_url)
+#
+# `get_settings()` enforces ADR-019's explicit-prod-opt-in guard itself
+# (config/settings.py's `_reject_production_dsn_without_explicit_opt_in`)
+# — an `ALEMBIC_DATABASE_URL` naming `finance_prod` without
+# `FINANCE_ENV_FILE` explicitly set raises `ProductionAccessRefusedError`
+# right here, before this ever reaches a real connection attempt. No
+# separate guard is needed in this file; typing `alembic upgrade head` by
+# hand in the dev tree is covered the same way `finops` is.
+config.set_main_option("sqlalchemy.url", get_settings().alembic_database_url.get_secret_value())
 
 target_metadata = Base.metadata
 

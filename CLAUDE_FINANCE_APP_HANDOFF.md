@@ -23,7 +23,7 @@ Build a production-grade, headless, single-user financial intelligence applicati
 9. Allows the financial agent to write user-controlled/agent-owned metadata such as budgets, categories, tags, notes, and preferences.
 10. Prevents the financial agent from directly modifying raw Plaid source-of-truth records.
 11. Runs on a Linux VPS and is primarily accessed by the single user over SSH.
-12. Uses Docker where it improves reproducibility, without introducing Kubernetes, distributed queues, microservices, or other infrastructure without a demonstrated need.
+12. Runs bare-metal on the VPS — no Docker (ADR-019, revised 2026-09-13; supersedes the earlier "Docker where it improves reproducibility" wording) — without introducing Kubernetes, distributed queues, microservices, or other infrastructure without a demonstrated need.
 13. Uses private Git hosting and CI/CD.
 14. Is developed and maintained with maximum practical autonomy using Claude Code as the lead engineering agent, plus specialized Claude Code subagents.
 15. Continues autonomous maintenance after v1: issue triage, test repair, dependency maintenance, safe bug fixes, deployment, monitoring, and rollback.
@@ -50,7 +50,7 @@ These are settled unless a hard technical constraint makes one impossible:
 - Financial agent permissions: may write controlled financial metadata such as budgets/categories/notes.
 - Insights: generated **on demand**, not proactively pushed to the user.
 - Host: **Linux VPS**.
-- Containers: **Docker is acceptable**.
+- Containers: **no Docker** (ADR-019, revised 2026-09-13 — supersedes "Docker is acceptable"; the owner decided against it for a single-host, single-operator deployment. Bare-metal release directories under `/opt/finance` instead).
 - Source control / delivery: **private Git repository + CI/CD**.
 - Infrastructure bias: keep it simple; avoid Kubernetes, Redis, Celery, Kafka, distributed queues, and microservices unless a real requirement emerges.
 - Autonomous engineering should continue after v1.
@@ -182,32 +182,34 @@ Prefer Linux-native encrypted credential handling suitable for a single VPS, suc
 
 ### 4.5 Claude Code does not receive production Plaid credentials
 
+**Revised 2026-09-13:** this section originally assumed the engineering environment and the production runtime boundary were on physically separate hosts with no network path between them. The owner has since deliberately chosen to run both on one VPS, bare-metal, no Docker (ADR-007/ADR-010/ADR-019, all revised the same date; see `docs/security-model.md`'s "Trust boundaries" for the full picture). Everything below still holds — it is enforced differently now, and that difference is stated explicitly rather than left implicit.
+
 The autonomous engineering environment should use:
 
 - Plaid Sandbox credentials;
 - synthetic financial data;
-- isolated PostgreSQL test containers;
+- a `finance_dev` database on the shared host PostgreSQL instance (ADR-019 — no test containers; one host instance, `finance_dev`/`finance_prod` as separate logical databases);
 - disposable development environments.
 
-Production credentials exist only in the production runtime boundary.
+Production credentials exist only in the production runtime boundary — meaning `/opt/finance/.env` and any `systemd-creds`-backed value, and the Unix user that owns them, not a separate machine.
 
-Enforce this at the harness level as well as by convention: use Claude Code permission rules (deny rules in `.claude/settings.json`) to block reads of production credential paths and to block shelling into the production host, so the boundary does not depend solely on the model's judgment.
+Enforce this at the harness level as well as by convention: use Claude Code permission rules (deny rules in `.claude/settings.json`) to block reads of production credential paths and to block the `ssh`/`scp`/`rsync`/`systemd-creds` commands. On a shared host these are policy-level denials, not network isolation — the actual technical backstop is that `/opt/finance` is owned by a Unix user the engineering session's user is not a member of and cannot `sudo` to. Verify periodically (`docs/runbooks/deploy.md` §1) that this permission boundary still holds.
 
-### 4.6 No direct code editing on the production VPS
+### 4.6 No direct code editing in `/opt/finance`
 
-Claude Code must not treat the production VPS as a development workstation.
+Claude Code must not treat the production deployment (`/opt/finance`) as directly editable, even when — as of 2026-09-13 — the VPS it runs on *is* the development workstation. The boundary that matters moved from "which host" to "which directory, owned by which user."
 
 Normal code path:
 
 ```text
-Claude Code -> branch/worktree -> commit -> PR -> CI -> merge -> image -> staging -> smoke tests -> production
+Claude Code -> branch/worktree -> commit -> PR -> CI -> merge -> [owner] copy release to /opt/finance -> migrate -> restart -> health check
 ```
 
 Emergency fixes should still be captured in Git and delivered through the release mechanism whenever technically possible.
 
 ### 4.7 No self-hosted CI runner on the financial VPS
 
-Do not run arbitrary GitHub Actions/PR code on the production financial VPS.
+Do not run arbitrary GitHub Actions/PR code on the production financial VPS. This is about GitHub Actions runners specifically — distinct from the engineering (Claude Code) session sharing the VPS, which §4.5/§4.6 above cover.
 
 Use hosted/isolated CI runners and a narrow production deployment mechanism.
 
@@ -255,7 +257,8 @@ Use a modular monolith.
                                   |
                             GitHub Actions
                                   |
-                      immutable container image
+        known git ref, copied to /opt/finance/releases/<sha>
+                  (ADR-019, revised 2026-09-13 — no Docker)
                                   |
                                   v
 +----------------------------------------------------------------+
@@ -853,7 +856,7 @@ The built-in `/security-review` command is a reasonable starting point for this 
 
 Focus:
 
-- Docker;
+- Bare-metal release management (`/opt/finance`, ADR-019 — no Docker);
 - CI/CD;
 - systemd;
 - health checks;
@@ -882,7 +885,7 @@ ARCHITECTURE
 - Python
 - PostgreSQL
 - SQLAlchemy/Alembic or verified equivalents
-- Docker/Compose
+- No Docker (ADR-019) — bare-metal `/opt/finance` release directories
 - modular monolith
 - provider-interchangeable runtime agent (OpenAI or Claude API, ADR-014)
 - Plaid Transactions Sync
@@ -898,7 +901,7 @@ NEVER
 - bypass CI to merge/deploy
 - disable tests merely to make a change pass
 - force-push protected main
-- run arbitrary PR code on the production VPS
+- run arbitrary PR code against /opt/finance or its credentials (engineering and production share a VPS as of 2026-09-13, ADR-007/ADR-010/ADR-019 — the boundary is the directory/Unix-user separation, not the host)
 
 ALWAYS
 - use migrations for schema changes
@@ -938,7 +941,7 @@ A production-release workflow should conceptually perform:
 
 1. Confirm clean, expected source revision.
 2. Confirm required CI checks.
-3. Build immutable image identified by Git SHA/release ID.
+3. Copy the known git ref into a new `/opt/finance/releases/<sha>/` directory (ADR-019 — no Docker image).
 4. Run migration compatibility/preflight.
 5. Deploy to staging or isolated production-like verification environment.
 6. Run smoke tests.
@@ -963,7 +966,6 @@ Good engineering capabilities may include:
 - official documentation search/access;
 - local filesystem;
 - shell in sandbox/development VM;
-- Docker;
 - narrow/read-only production observability.
 
 Avoid attaching a generic production PostgreSQL MCP with unrestricted SQL capability.
@@ -987,8 +989,7 @@ It should contain:
 ```text
 Claude Code
 Git
-Docker
-PostgreSQL test container(s)
+PostgreSQL (host-installed; a `finance_dev` database — ADR-019, no Docker)
 Plaid Sandbox credentials
 synthetic financial fixtures
 Python toolchain
@@ -1018,8 +1019,8 @@ Runtime agent providers: official OpenAI SDK and official Anthropic SDK, each be
 Testing: pytest
 Static/lint: Ruff
 Type checking: Pyright or equivalent
-Containers: Docker + Compose
-Reverse proxy/TLS: Caddy if webhook endpoint is enabled
+Containers: none (ADR-019, revised 2026-09-13 — bare-metal `/opt/finance` release directories, no Docker)
+Reverse proxy/TLS: Caddy if webhook endpoint is enabled (host-installed)
 Scheduling: systemd timers
 ```
 
@@ -1045,7 +1046,7 @@ agent tool tests
 agent evals for critical cases
 secret scanning
 dependency/security scanning
-container build validation
+release build validation (virtualenv sync + import smoke test — no container, ADR-019)
 ```
 
 For consequential changes, add independent reviewer/security agent checks.
@@ -1060,22 +1061,20 @@ Use immutable/pinned dependencies/actions where appropriate and maintain them in
 
 Git is the source of truth.
 
-Target path:
+**Target path, revised 2026-09-13 (ADR-019 — no Docker, no registry):**
 
 ```text
 main
   -> CI passes
-  -> build image
-  -> tag by immutable Git SHA/release ID
-  -> publish to registry
+  -> [owner] copy the git ref into a new /opt/finance/releases/<sha>/ directory
   -> staging/preflight
   -> smoke + migration + critical evals
-  -> production deploy
+  -> [owner] repoint /opt/finance/current -> releases/<sha>; restart
   -> post-deploy health checks
-  -> auto rollback on defined failure
+  -> auto rollback on defined failure (repoint `current` back, restart)
 ```
 
-Avoid mutable `latest` as the sole production identifier.
+Avoid a mutable "latest" release directory as the sole production identifier — the `current` symlink must point at one specific, immutable release directory at a time, same principle as the old "no mutable `latest` image tag" rule.
 
 Track both current and previous known-good releases so rollback is trivial.
 
@@ -1083,16 +1082,16 @@ Use GitHub deployment environments/protection rules where useful and available f
 
 ---
 
-## 20. Docker / Service Topology
+## 20. Service Topology (no Docker — ADR-019, revised 2026-09-13)
 
 Production should remain small.
 
-Expected services:
+Expected processes (systemd units invoking a virtualenv binary directly, not Docker services):
 
 ```text
-app
-postgres
-caddy   # only if public webhook/TLS endpoint is used
+app       (the finance/finops entrypoints, under /opt/finance/current)
+postgres  host-installed, not publicly exposed
+caddy     only if public webhook/TLS endpoint is used, host-installed
 ```
 
 No Kubernetes.
@@ -1226,7 +1225,7 @@ Critical evals must run before production changes to prompts, tools, or model co
 
 Maximum autonomy does **not** mean every incident should trigger an automatic write.
 
-### Class A — autonomous repair/deploy
+### Class A — autonomous repair/merge
 
 Examples:
 
@@ -1238,7 +1237,17 @@ Examples:
 - patch dependency update;
 - clearly non-breaking maintenance.
 
-Agent may diagnose, patch, review, merge, and deploy after normal gates.
+Agent may diagnose, patch, review, and merge to `main` autonomously once required CI checks
+are green — never by bypassing or weakening a check. This is the standing default whenever a
+session is asked to continue the milestone backlog autonomously (§34), regardless of whether
+that session is interactive, resumed, or started by a scheduled routine — see ADR-017.
+
+Merge is not deploy. Production deploy is always an owner-performed `finops deploy` on the
+VPS, for every risk class without exception, per §19's release sequence and
+`docs/deployment.md` — CI green and a merged PR authorize a release to *exist*, never to reach
+production unattended. This holds independent of Milestone 9: autonomous production deployment
+does not exist until that milestone defines its own rollback criteria, and Class A autonomy
+never implies it in the meantime.
 
 ### Class B — autonomous with stronger independent gates
 
@@ -1361,7 +1370,7 @@ ADR-006 Deterministic financial arithmetic
 ADR-007 Git/CI/CD is the only normal production code path
 ADR-008 Immutable container releases and rollback
 ADR-009 Isolated development environment with Plaid Sandbox
-ADR-010 Production secrets excluded from the Claude Code engineering environment
+ADR-010 Production secrets excluded from the Claude Code engineering session
 ADR-011 systemd timers for scheduled single-host jobs
 ADR-012 Daily sync remains reconciliation fallback even with webhooks
 ADR-013 Claude Code for engineering, OpenAI for the runtime financial agent (runtime-provider portion superseded by ADR-014)
@@ -1384,7 +1393,7 @@ Deliver:
 - architecture/security docs;
 - initial ADRs;
 - Python project/tooling;
-- isolated development Compose environment;
+- isolated development environment (ADR-019, revised 2026-09-13: a `finance_dev` database on a host-installed PostgreSQL instance, not a Compose environment — no Docker);
 - PostgreSQL test service;
 - CI skeleton;
 - `.claude/agents/` subagent definitions compatible with the installed version;
@@ -1508,24 +1517,26 @@ Exit criteria:
 
 ### Milestone 7 — Production deployment
 
+**Redesigned 2026-09-13 (ADR-019): no Docker.** The list below now describes the bare-metal target, superseding the original Compose/image-based deliverables. See ADR-019's implementation-status table for exactly what's shipped vs. not as of the revision.
+
 Deliver:
 
-- production Compose/services;
-- Caddy/TLS if webhook enabled;
-- encrypted credentials;
-- systemd services/timers;
-- CI/CD;
-- immutable images;
+- `/opt/finance` bare-metal release-directory layout, provisioned per `docs/runbooks/deploy.md`;
+- Caddy/TLS if webhook enabled (host-installed, not a Compose service);
+- encrypted credentials (`/opt/finance/.env` mode 600, plus `systemd-creds` for anything warranting the extra layer);
+- systemd services/timers (invoking a virtualenv binary directly, not `docker compose run`);
+- CI/CD (redesigned without an image-publish step — see ADR-019);
+- immutable releases (a copied, CI-green git ref under `/opt/finance/releases/`, not a container image);
 - staging/preflight;
 - health checks;
-- rollback;
-- backup + restore verification;
+- rollback (a `current` symlink repoint, not an image tag swap);
+- backup + restore verification (against the host `finance_prod` database directly);
 - production runbooks.
 
 Exit criteria:
 
 - release and rollback are repeatable;
-- production app runs without the engineering environment holding runtime secrets;
+- production app runs without the engineering session holding or being able to read runtime secrets (§4.5 — enforced by `/opt/finance`/Unix-user separation now that engineering and production share a VPS, not by host separation);
 - backup restore test succeeds.
 
 ### Milestone 8 — Plaid webhook
@@ -1628,6 +1639,11 @@ Required where applicable:
 - agent eval if prompts/tools changed;
 - docs update if behavior/architecture changed;
 - runbook update if operations changed;
+- **`README.md`'s Status line reflects reality if this PR completes or begins a milestone** —
+  not just "docs updated" in general; this line specifically has gone stale in the past
+  (CI enforces this mechanically for milestone-titled/milestone-branched PRs, see
+  `.github/workflows/ci.yml`'s `docs-freshness` job, but the rule holds regardless of whether
+  a given PR happens to trip that heuristic);
 - clean CI;
 - no new untracked secrets;
 - clear rollback path for production-impacting work.
@@ -1655,6 +1671,18 @@ Escalate only for decisions such as:
 - two materially different user-facing product choices cannot be resolved from this document.
 
 When blocked, continue all independent work first, then ask one concise question with a recommended default.
+
+### No one present to answer
+
+The list above assumes a human is there to answer and wait for. That assumption does not hold
+for a session running autonomous continuation (§34) with nobody actively watching — a
+scheduled routine, or an interactive session the user has stepped away from. In that mode, on
+hitting any item from the list above (or a Class C condition), do not idle waiting for a
+response and do not guess: stop the current unit of work cleanly, leave a durable note
+explaining exactly what's blocked and the recommended default (a PR description, a commit
+message, or a GitHub issue — whichever fits what was in progress), and end the session. Never
+retry a blocked action in a loop hoping the blocker resolves itself. All other independent,
+unblocked work should still be finished first, same as the interactive case.
 
 ### Verify unstable technical details
 
@@ -1690,7 +1718,7 @@ For technical behavior, prefer:
 Before adding any service/framework, answer:
 
 1. What concrete problem does it solve now?
-2. Can PostgreSQL, systemd, Docker, or plain Python solve it more simply?
+2. Can PostgreSQL, systemd, or plain Python solve it more simply? (No Docker — ADR-019.)
 3. What new failure mode/security surface does it introduce?
 
 If the benefit is speculative, do not add it.

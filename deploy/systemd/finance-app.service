@@ -1,0 +1,64 @@
+[Unit]
+Description=finance-app production stack (docker compose) — postgres only until Milestone 8 (ADR-016 D2)
+Documentation=https://github.com/jq712/claude-finance-app/blob/main/docs/deployment.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/finance-app
+
+# Sandboxing for the host-side `docker compose` CLI process this unit
+# execs. It only needs to read compose.yaml/scripts under
+# WorkingDirectory, write to a private /tmp, and connect to the Docker
+# socket (a connect() on an existing inode, which a read-only mount does
+# not block) -- nothing here needs write access to the rest of the host
+# filesystem. Validate with `systemd-analyze security finance-app.service`
+# after deploying; these are the standard, widely-used defaults for a
+# docker-CLI wrapper unit, not exhaustively tested against this repo's
+# exact scripts on a real VPS.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Production secret material (handoff §4.4, ADR-010) — minted once via
+# `systemd-creds encrypt` per docs/runbooks/deploy.md, never as plaintext
+# files or environment variables on disk. Decrypted only into this unit's
+# private $CREDENTIALS_DIRECTORY for the lifetime of the service.
+#
+# ADR-016 D1: trimmed to exactly the `postgres` job's set — this unit's
+# plain `docker compose up -d`/`down` (no `--profile`) brings up only the
+# un-profiled `postgres` service (D2 — `app` is no longer long-running),
+# which needs only its own bootstrap password. It no longer decrypts the
+# Plaid production access token, any model provider key, or any
+# credential besides the one Postgres role password.
+LoadCredentialEncrypted=finance_migrator_db_password:/etc/finance-app/credentials/finance_migrator_db_password.cred
+
+# Non-secret, per-host configuration (RELEASE_ID, CONTAINER_IMAGE_REPO,
+# AGENT_PROVIDER, ...) — safe to keep as a plain file since it holds no
+# credential material; updated by `deploy/scripts/finops.sh` after every
+# deploy/rollback (ADR-016 D8) or by hand, never by CI.
+EnvironmentFile=-/etc/finance-app/env
+
+ExecStart=/opt/finance-app/deploy/scripts/with-production-env.sh postgres -- docker compose -f /opt/finance-app/deploy/compose.yaml up -d
+ExecStop=/opt/finance-app/deploy/scripts/with-production-env.sh postgres -- docker compose -f /opt/finance-app/deploy/compose.yaml down
+# ADR-016 D2: "restart app" no longer means anything — there is no
+# long-running `app` container to restart. Reload now means "converge
+# the running stack to whatever RELEASE_ID/env is currently configured",
+# the same operation `finops restart` performs from the `deploy`
+# Compose service (docs/deployment.md) — a plain `up -d` is idempotent
+# when nothing changed.
+ExecReload=/opt/finance-app/deploy/scripts/with-production-env.sh postgres -- docker compose -f /opt/finance-app/deploy/compose.yaml up -d
+
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
