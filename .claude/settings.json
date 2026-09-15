@@ -32,13 +32,15 @@
       "Read(//etc/finance/**)",
       "Read(//etc/finance-app/**)",
       "Read(//etc/credstore*/**)",
+      "Read(//opt/finance/**)",
       "Read(~/.plaid/**)",
       "Bash(ssh:*)",
       "Bash(scp:*)",
       "Bash(rsync:*)",
       "Bash(systemd-creds:*)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
+      "Bash(git push -f:*)",
+      "Bash(deploy/scripts/release.sh:*)"
     ],
     "ask": [
       "Bash(docker compose -f deploy/compose.yaml:*)",
