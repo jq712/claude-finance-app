@@ -57,7 +57,12 @@ def test_artifact_ref_round_trips_through_downgrade_and_upgrade(
         with migrator_engine.begin() as conn:
             conn.execute(text("SELECT 1"))  # sanity: role can connect before downgrading
 
-        down = _alembic("downgrade", "-1")
+        # Targeted at 0006's own down_revision, not a relative `-1`: a
+        # relative count silently downgrades whatever the *current* head
+        # happens to be, which stopped being 0006 once migration 0007
+        # landed on top of it — `-1` from a later head undoes the wrong
+        # migration instead of this one.
+        down = _alembic("downgrade", "a1c3e9f4d2b7")
         assert down.returncode == 0, f"downgrade failed:\n{down.stdout}\n{down.stderr}"
 
         with app_engine.begin() as conn:
