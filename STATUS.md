@@ -8,6 +8,17 @@ was observed directly — a command run, a file read, `gh`/`git` queried — not
 Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode.json`,
 `.opencode/` (the OpenCode harness port) and a stray `tmux-client-13198.log`.
 
+## Last session
+
+**2026-09-15 — `docker-removal-audit` @ `3f4a7fa`**
+
+- Landed: `## Git` section added to `AGENTS.md` + `CLAUDE.md` (gh PR/branch workflow,
+  merge via `.opencode/scripts/merge-class-a.sh`, and the "read STATUS.md at session start /
+  update `Last session` after each task" rules).
+- Blocked: nothing.
+- Next command: `git cherry-pick 835c63a` (ADR-019 Docker removal) onto this branch, then fix its two
+  `ci.yml` defects (`production-deploy` needs list + `release-preflight` archive `pipefail`).
+
 ## 1. What works now
 
 Milestones 0–6 are merged (`gh pr list --state merged`: PRs #1–#9) and pass. Commands below run
