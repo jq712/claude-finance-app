@@ -1,6 +1,6 @@
-"""Adversarial regression tests for the *deployed* topology
-(QA round 2 + round 3, Milestone 7 — handoff §19/§20, ADR-007, ADR-008,
-ADR-016).
+"""Adversarial regression tests for `deploy/scripts/with-production-env.sh`
+and the restore-drill unit (QA round 2 + round 3, Milestone 7 —
+handoff §19/§20, ADR-007, ADR-008, ADR-016, ADR-019).
 
 Round 1 (`tests/unit/test_ops_host_env_regression.py`, formerly
 `test_ops_compose_env_regression.py`) proved that the runner-invocation
@@ -8,24 +8,23 @@ wrapper merges rather than replaces the environment. Round 2 found three
 defects in the pre-ADR-016 topology (all fixed by ADR-016's D1/D2/D7) and
 one probe design flaw (QA-26, fixed by D3's `probe_release` — its own
 tests moved to `test_deploy_topology_baremetal.py` under ADR-019, since
-they no longer touch anything in this file's Docker-Compose-topology
-subject matter). Round 3
-found that ADR-016's own D1 implementation (`deploy/scripts/
+they no longer touch anything in this file's remaining subject matter).
+Round 3 found that ADR-016's own D1 implementation (`deploy/scripts/
 with-production-env.sh`) introduced two new defects of its own — a
 plaintext credential temp file that survived `exec` (never cleaned up) and
 a credential-content round-trip that could inject one job's variable into
-another's or silently truncate a multi-line value — and that the drift
-test this file promises (compose.yaml's and with-production-env.sh's own
-comments both point here) had never actually been written, so none of this
-was mechanically enforced.
+another's or silently truncate a multi-line value.
 
-This file is now that drift test, plus direct regression coverage for
-every defect found so far. Static/config-shape assertions run with no
-Docker daemon required (CI's `unit-tests` job); the drift test and the
-wrapper-behavior tests below execute the real `with-production-env.sh`
-under `/bin/sh` against a synthetic `$CREDENTIALS_DIRECTORY` — still no
-Docker, no systemd, no real credentials, but real shell semantics instead
-of a regex guess at them.
+ADR-019 removed `deploy/compose.yaml`/`deploy/compose.dev.yaml`/`Dockerfile`
+and, with them, this file's former compose.yaml-vs-wrapper drift test (it
+asserted the wrapper's job matrix against literal compose.yaml service
+blocks, which no longer exist to compare against) — `with-production-env.sh`
+itself was deliberately left in scope for a later backup/restore-adaptation
+follow-up (ADR-015's "Revisit when"), so its own behavior stays covered
+here. What remains is direct regression coverage for every wrapper/
+restore-drill defect found so far, executing the real scripts under
+`/bin/sh` against synthetic fixtures — no Docker, no systemd, no real
+credentials, but real shell semantics instead of a regex guess at them.
 """
 
 from __future__ import annotations
@@ -37,20 +36,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import pytest
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPOSE_FILE = _REPO_ROOT / "deploy" / "compose.yaml"
 _WRAPPER = _REPO_ROOT / "deploy" / "scripts" / "with-production-env.sh"
 _RESTORE_DRILL_UNIT = _REPO_ROOT / "deploy" / "systemd" / "finance-restore-drill.service"
 _RESTORE_VERIFY_SCRIPT = _REPO_ROOT / "deploy" / "scripts" / "restore-verify.sh"
 
-# `${NAME:?message}` — a variable Compose refuses to interpolate without.
-_REQUIRED_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+):\?")
-_CREDENTIAL_VAR_REF_RE = re.compile(r"\$\{([A-Z0-9_]+):-")
-
-# stem in $CREDENTIALS_DIRECTORY -> the env var deploy/compose.yaml expects,
-# mirroring with-production-env.sh's own `_credential_names`.
+# stem in $CREDENTIALS_DIRECTORY -> the env var with-production-env.sh
+# exports, mirroring the script's own `_credential_names`.
 _CREDENTIAL_FILES = {
     "PLAID_CLIENT_ID": "plaid_client_id",
     "PLAID_SECRET": "plaid_secret",
@@ -65,64 +57,6 @@ _CREDENTIAL_FILES = {
     "FINANCE_BACKUP_DB_PASSWORD": "finance_backup_db_password",
     "BACKUP_ENCRYPTION_KEY": "backup_encryption_key",
 }
-
-# job -> compose service it maps to 1:1 for credential purposes. `app` is
-# handled separately (its provider key is either/or, not fixed); `health`
-# is deliberately excluded — it runs the `app` service but is a
-# documented, narrower subset of its credential needs (ops/health.py
-# never touches AGENT_DATABASE_URL or a provider key, so those
-# interpolating empty is harmless). `restore-drill` maps to `backup`:
-# restore-verify.sh's own `docker compose` calls all target
-# `--profile backup run --rm backup` (the scratch Postgres it also starts
-# is a *bare* `docker run`, entirely outside Compose, which is the only
-# part of this job with no compose service of its own) — the drift test
-# previously excluded `restore-drill` on the mistaken assumption that none
-# of it went through Compose.
-_JOB_TO_SERVICE = {
-    "postgres": "postgres",
-    "migrate": "migrate",
-    "sync": "sync",
-    "backup": "backup",
-    "restore-drill": "backup",
-    "finops": "finops",
-    "deploy": "deploy",
-}
-
-# Known, documented, accepted gaps between a service's declared `${VAR:-}`
-# references and what its job actually loads — not defects.
-_KNOWN_GAPS: dict[str, set[str]] = {
-    # Milestone 8: the webhook secret isn't minted yet and nothing reads
-    # it in `sync` until the webhook endpoint exists (ADR-016 Revisit-when,
-    # security review finding 9). Must gain real enforcement before
-    # Milestone 8 treats an empty secret as "verification configured".
-    "sync": {"PLAID_WEBHOOK_SECRET"},
-}
-
-
-def _service_blocks(compose_text: str) -> dict[str, str]:
-    """Split the `services:` mapping into `{name: raw text}`. A plain text
-    split rather than a YAML parse: PyYAML is not a dependency of this
-    project and adding one just to assert on a config file would be a new
-    dependency for a test, which CLAUDE.md's "what problem does it solve
-    now" rule does not justify."""
-    lines = compose_text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.rstrip() == "services:")
-    blocks: dict[str, list[str]] = {}
-    current = ""
-    for line in lines[start + 1 :]:
-        if line and not line[0].isspace():  # left the `services:` mapping
-            break
-        match = re.match(r"^  ([a-z0-9_-]+):\s*$", line)
-        if match:
-            current = match.group(1)
-            blocks[current] = []
-        elif current:
-            blocks[current].append(line)
-    return {name: "\n".join(body) for name, body in blocks.items()}
-
-
-def _credential_vars_referenced(block: str) -> set[str]:
-    return {name for name in _CREDENTIAL_VAR_REF_RE.findall(block) if name in _CREDENTIAL_FILES}
 
 
 def _wrapper_exports(job: str, *, agent_provider: str = "openai") -> set[str]:
@@ -155,71 +89,8 @@ def _wrapper_exports(job: str, *, agent_provider: str = "openai") -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# The drift test: with-production-env.sh's job matrix vs. compose.yaml.
+# with-production-env.sh's own credential-scoping behavior.
 # ---------------------------------------------------------------------------
-
-
-def test_no_compose_service_declares_a_required_interpolation_variable() -> None:
-    """ADR-016 D1: Compose interpolates every `${VAR}` in the whole file
-    before running any one service, so a whole-file `${VAR:?required}`
-    could never express a per-job requirement (QA-20) — enforcement moved
-    to `with-production-env.sh`'s job matrix, tested below.
-
-    Scans only non-comment lines: the file's own header comment uses the
-    literal string `${VAR:?required}` as an illustrative example of the
-    pattern that must no longer appear for real — a naive whole-file
-    regex match against that comment is exactly how the original version
-    of this test (QA-33/security review) stayed green whether or not the
-    real defect was fixed."""
-    non_comment_lines = "\n".join(
-        line for line in _COMPOSE_FILE.read_text().splitlines() if not line.lstrip().startswith("#")
-    )
-    required = set(_REQUIRED_VAR_RE.findall(non_comment_lines))
-    assert not required, (
-        f"deploy/compose.yaml still has ${{VAR:?required}} interpolation for {required}; "
-        "ADR-016 D1 requires every credential-shaped variable to use ${VAR:-} instead, "
-        "with requirement enforcement living in with-production-env.sh's job matrix"
-    )
-
-
-@pytest.mark.parametrize("job,service", sorted(_JOB_TO_SERVICE.items()))
-def test_wrapper_job_covers_every_credential_its_compose_service_references(
-    job: str, service: str
-) -> None:
-    compose_text = _COMPOSE_FILE.read_text()
-    block = _service_blocks(compose_text)[service]
-    referenced = _credential_vars_referenced(block) - _KNOWN_GAPS.get(service, set())
-    exported = _wrapper_exports(job)
-    missing = referenced - exported
-    assert not missing, (
-        f"with-production-env.sh job {job!r} does not export {missing}, which "
-        f"deploy/compose.yaml's {service!r} service references via ${{VAR:-}} — that "
-        "service would start with those credentials silently empty"
-    )
-
-
-def test_app_job_covers_its_credentials_and_only_the_active_provider_key() -> None:
-    """`app`'s provider key is either/or (AGENT_PROVIDER), not a fixed
-    entry in the job matrix — both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
-    appear in compose.yaml's `app` block unconditionally (the inactive
-    one interpolates to an empty string, which is fine — `app` never uses
-    it), so this is checked separately from the generic per-service loop
-    above rather than requiring both providers' keys at once."""
-    compose_text = _COMPOSE_FILE.read_text()
-    block = _service_blocks(compose_text)["app"]
-    referenced = _credential_vars_referenced(block) - {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
-
-    exported_openai = _wrapper_exports("app", agent_provider="openai")
-    assert referenced <= exported_openai
-    assert "OPENAI_API_KEY" in exported_openai
-    assert "ANTHROPIC_API_KEY" not in exported_openai, (
-        "job 'app' must export only the *active* provider's key, never both"
-    )
-
-    exported_anthropic = _wrapper_exports("app", agent_provider="anthropic")
-    assert referenced <= exported_anthropic
-    assert "ANTHROPIC_API_KEY" in exported_anthropic
-    assert "OPENAI_API_KEY" not in exported_anthropic
 
 
 def test_deploy_job_excludes_plaid_backup_and_provider_credentials() -> None:
@@ -426,29 +297,6 @@ def test_wrapper_rejects_an_unknown_job() -> None:
     )
     assert result.returncode == 2
     assert "unknown job" in result.stderr
-
-
-# ---------------------------------------------------------------------------
-# D2 — app has no restart policy and no baked-in command.
-# ---------------------------------------------------------------------------
-
-
-def test_app_service_has_no_restart_policy_or_command() -> None:
-    """ADR-016 D2: a container kept alive with a placeholder one-shot
-    command (the prior `["finance", "status"]` + `restart: unless-stopped`)
-    crash-loops forever the instant that command exits (QA-24). `app` must
-    have neither a `restart:` policy nor a baked-in `command:` — it runs
-    only as `docker compose --profile app run --rm app <cmd>`."""
-    compose_text = _COMPOSE_FILE.read_text()
-    app_block = _service_blocks(compose_text)["app"]
-    assert not re.search(r"^    restart:", app_block, flags=re.MULTILINE), (
-        "app has a restart: policy — combined with no persistent process to keep "
-        "alive (D2), this crash-loops"
-    )
-    assert not re.search(r"^    command:", app_block, flags=re.MULTILINE), (
-        "app has a baked-in command: — it must be started only via "
-        "`docker compose --profile app run --rm app <cmd>`"
-    )
 
 
 # ---------------------------------------------------------------------------

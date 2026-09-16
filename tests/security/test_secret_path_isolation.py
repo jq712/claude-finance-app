@@ -42,7 +42,6 @@ _PRODUCTION_SECRET_MARKERS = (
 # supposed to reference it; this test is about it never leaking into the
 # dev/CI-facing surface, not about it not existing at all.
 _DEV_AND_CI_FILES = (
-    REPO_ROOT / "deploy" / "compose.dev.yaml",
     REPO_ROOT / ".github" / "workflows" / "ci.yml",
     REPO_ROOT / ".env.example",
 )
@@ -58,15 +57,3 @@ def test_production_secret_paths_are_not_referenced_in_dev_or_ci_config() -> Non
                 "production's systemd-decrypted credential material (docs/security-model.md "
                 "invariant 4)"
             )
-
-
-def test_dev_compose_uses_only_synthetic_placeholder_credentials() -> None:
-    """`deploy/compose.dev.yaml` is the file every local `finance`/pytest
-    run and CI job point at. It must carry an obviously-synthetic
-    password, not something that could be mistaken for (or copy-pasted
-    from) a real credential."""
-    content = (REPO_ROOT / "deploy" / "compose.dev.yaml").read_text()
-    assert "devpassword" in content, (
-        "deploy/compose.dev.yaml's bootstrap password changed; re-verify it's still an "
-        "obviously-synthetic placeholder, not something that looks like a real credential"
-    )

@@ -47,7 +47,8 @@ def test_alembic_is_at_a_known_head(migrator_engine) -> None:
 
 
 def test_migrator_dsn_matches_the_role_that_ran_migrations() -> None:
-    # Sanity check on the test helper itself: this is the same role
-    # deploy/compose.dev.yaml and CI configure as the container bootstrap
-    # user, i.e. the one that actually ran `alembic upgrade head`.
+    # Sanity check on the test helper itself: this is the same role a
+    # local dev Postgres instance and CI's Postgres service container
+    # configure as the bootstrap user, i.e. the one that actually ran
+    # `alembic upgrade head`.
     assert role_dsn("finance_migrator").startswith("postgresql+psycopg://finance_migrator:")

@@ -1,7 +1,7 @@
 ---
 description: Fresh-context correctness review of a diff. Dispatched by the pre-merge-review skill before any unit of work is called done or a PR is opened — Class A included. Correctness findings block; style, simplification, reuse, and efficiency findings are optional and non-blocking. Read-only by design.
 mode: subagent
-model: kimi-for-coding/k3
+model: moonshotai/kimi-k3
 permission:
   edit: deny
   write: deny

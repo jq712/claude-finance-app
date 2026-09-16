@@ -3,17 +3,17 @@ import os
 import pytest
 from sqlalchemy import Engine, create_engine
 
-# `deploy/compose.yaml` interpolates `${FINANCE_*_DB_PASSWORD:?required}`/
-# `${PLAID_*:?required}` — in production these come from
-# `deploy/scripts/with-production-env.sh` (systemd encrypted credentials).
+# `FINANCE_*_DB_PASSWORD`/`PLAID_*` are the credential env vars
+# `/opt/finance/.env` supplies in production (ADR-019; formerly
+# `deploy/compose.yaml`'s `${VAR:?required}` interpolation, now removed).
 # `tests/unit/test_ops_host_env_regression.py` (formerly
 # `test_ops_compose_env_regression.py`) exercises `run_release`'s real
 # environment-merging behavior (QA-1), which needs the same shape of
-# ambient environment to prove anything; `.github/workflows/ci.yml`'s
-# `staging-smoke` job uses the identical synthetic placeholder pattern.
-# `setdefault` so a real CI/job-level value (or a developer's own `.env`
-# export) is never overridden.
-_DEPLOY_COMPOSE_ENV_DEFAULTS = {
+# ambient environment to prove anything; `deploy/scripts/with-production-env.sh`
+# and `deploy/scripts/finops.sh` are the production consumers of this exact
+# variable set. `setdefault` so a real CI/job-level value (or a developer's
+# own `.env` export) is never overridden.
+_RELEASE_ENV_DEFAULTS = {
     "FINANCE_MIGRATOR_DB_PASSWORD": "devpassword",
     "FINANCE_APP_DB_PASSWORD": "devpassword",
     "FINANCE_AGENT_DB_PASSWORD": "devpassword",
@@ -23,7 +23,7 @@ _DEPLOY_COMPOSE_ENV_DEFAULTS = {
     "PLAID_SECRET": "test-placeholder",
     "PLAID_ACCESS_TOKEN": "test-placeholder",
 }
-for _key, _value in _DEPLOY_COMPOSE_ENV_DEFAULTS.items():
+for _key, _value in _RELEASE_ENV_DEFAULTS.items():
     os.environ.setdefault(_key, _value)
 
 

@@ -112,6 +112,18 @@ fresh-context correctness pass before any unit of work — Class A included — 
 - Plaid Sandbox credentials only. If a task appears to need production Plaid credentials, stop and escalate — that is a design error, not a credential problem.
 - Do not add a dependency, service, or framework without answering: what concrete problem does it solve *now*, can Postgres/systemd/plain Python do it more simply, and what new failure mode does it introduce? (No Docker — ADR-019.)
 
+## Git
+
+- Use `gh` for PRs, checks, and branch delete.
+- Never commit or push `main`. Never force-push.
+- New work on a branch off latest `origin/main`.
+- `git fetch origin` before branch or cherry-pick.
+- Open PRs with `gh pr create --base main`.
+- Merge only via `.opencode/scripts/merge-class-a.sh` (not `gh pr merge`).
+- Do not work in or copy from dirty/locked worktrees.
+- Read STATUS.md at session start. If it disagrees with git, trust git and fix STATUS.md.
+- After each task, update STATUS.md "Last session".
+
 ## Definition of done
 
 Implementation · types/lint clean · unit tests · integration tests · migration if schema changed · agent eval if prompts or tools changed · docs updated if behavior changed · runbook updated if operations changed · **`README.md`'s Status line updated if this PR completes or begins a milestone** (CI's `docs-freshness` job checks this mechanically for milestone-titled/milestone-branched PRs — it has gone stale before, don't rely on memory) · fresh-context correctness review via `.opencode/skills/pre-merge-review` (every class, not just Class B) · CI green · no new secrets · clear rollback path.

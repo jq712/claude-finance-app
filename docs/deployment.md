@@ -4,7 +4,7 @@ Milestone 7 deliverable (handoff §29). Covers the production topology, the rele
 
 ## What exists today vs. what this document describes
 
-As of 2026-09-13, `finops deploy`/`rollback`/`restart` are rewritten for ADR-019's bare-metal symlink model — `src/finance_app/ops/host.py` (release-directory/`systemctl` invocation, superseding `src/finance_app/ops/compose.py`, now deleted), `src/finance_app/ops/identity.py` (non-forgeable release identity via `git archive export-subst`), and `config/settings.py`'s explicit-prod-opt-in guard (`FINANCE_ENV_FILE`) are all shipped. **Now also shipped**: `deploy/scripts/release.sh`, the release-copy step `finops deploy` refuses to perform itself — see the "Release-copy step" section below. **Still not done**: the systemd unit files (`Settings.production_units` defaults empty — `deploy`/`restart` skip the actual restart and say so until those land), and CI's Docker-shaped jobs (`container-build`/`publish-image`/`migration-preflight`/`staging-smoke`) haven't been redesigned yet — a follow-up session's work. `Dockerfile`, `deploy/compose*.yaml`, and every other file under `deploy/scripts/` besides `release.sh` are deliberately left in place, now orphaned, to be removed together with their own test coverage in that follow-up PR — do not treat them as current guidance. **No production deployment is provisioned yet**: `/opt/finance` doesn't exist on the VPS, and neither does the second `finance_prod` database — see `docs/runbooks/deploy.md`.
+As of 2026-09-15, `finops deploy`/`rollback`/`restart` are rewritten for ADR-019's bare-metal symlink model — `src/finance_app/ops/host.py` (release-directory/`systemctl` invocation, superseding `src/finance_app/ops/compose.py`, now deleted), `src/finance_app/ops/identity.py` (non-forgeable release identity via `git archive export-subst`), and `config/settings.py`'s explicit-prod-opt-in guard (`FINANCE_ENV_FILE`) are all shipped. Also shipped: `deploy/scripts/release.sh`, the release-copy step `finops deploy` refuses to perform itself — see the "Release-copy step" section below. **Now also shipped**: CI's Docker-shaped jobs are redesigned — `container-build`/`publish-image`/`migration-preflight`/`staging-smoke` are gone, replaced by a single `release-preflight` job that git-archives the checked-out tree, builds its venv non-editable, and runs a real migration plus `finance selfcheck` against a throwaway database, mirroring `release.sh`'s own mechanism (see "CI preflight" below). `Dockerfile` and `deploy/compose*.yaml` are removed, along with the tests that existed only to exercise them. **Still not done**: the systemd unit files (`Settings.production_units` defaults empty — `deploy`/`restart` skip the actual restart and say so until those land). **No production deployment is provisioned yet**: `/opt/finance` doesn't exist on the VPS, and neither does the second `finance_prod` database — see `docs/runbooks/deploy.md`.
 
 ## Topology
 
@@ -25,23 +25,28 @@ Credentials live in `/opt/finance/.env` (mode 600, production Unix user only) pl
 
 ```
 push to main
-  -> lint/typecheck, unit, integration, security, agent-evals, secret-scan   (existing CI)
-  -> [owner]              copy a known, CI-green git ref into
-                           /opt/finance/releases/<sha>/
+  -> lint/typecheck, unit, integration, security, dependency-scan,
+     secret-scan, release-preflight, agent-evals                  (CI)
+  -> [owner]              deploy/scripts/release.sh <sha> on the VPS —
+                           git-archives, gates on origin/main first-parent
+                           provenance, builds the release venv
   -> [owner]              back up finance_prod
-  -> [owner]              alembic upgrade head against finance_prod,
-                           from the new release directory
-  -> [owner]              repoint /opt/finance/current -> releases/<sha>
+  -> [owner]              finops deploy <sha> — migrates finance_prod,
+                           health-checks the new release by path, then
+                           atomically repoints /opt/finance/current
   -> [owner]              systemctl restart the production units
   -> [owner]              finops health / finance status against finance_prod
-                           to confirm; repoint `current` back and restart
-                           again if unhealthy (ADR-008's "one rollback step"
-                           principle, now a symlink swap)
-  -> release recorded (mechanism TBD by the follow-up session — some
-     equivalent of today's ops.releases bookkeeping, against finance_prod)
+                           to confirm; `finops rollback` repoints `current`
+                           back and restarts again if unhealthy (ADR-008's
+                           "one rollback step" principle, now a symlink swap)
+  -> release recorded (ops.releases bookkeeping, against finance_prod)
 ```
 
-No image build, no registry, no `production-deploy` GitHub Environment gate in the old sense — a follow-up session decides what (if anything) CI's own gating looks like for "this git ref is safe to copy to `/opt/finance`" once the release mechanism itself is designed. Until then, treat every push to `main` that's green through the existing test/lint/security/eval jobs as a candidate the owner may deploy by hand, per the runbook.
+No image build, no registry, no `production-deploy` GitHub Environment gate in the old sense — `production-deploy` is now a documented no-op gate (see `.github/workflows/ci.yml`) that records readiness and points the owner at the runbook, since ADR-019 removed both the artifact a real gate would attach to and the host to deploy onto. See "CI preflight" and "Deliberately deferred" below for what CI does and does not still verify before a push to `main` is a candidate for `release.sh`.
+
+## CI preflight
+
+`release-preflight` (part of the existing CI workflow, runs on every PR and push to `main`) is the bare-metal-shaped replacement for the old `container-build`/`migration-preflight`/`staging-smoke` trio — there is no image or registry for a Docker-shaped gate to attach to anymore, but dropping preflight verification entirely would be a real regression: a broken migration or a broken venv currently gets caught before anything is installed, and that property is worth keeping. It mirrors `release.sh`'s own mechanism rather than testing the live checkout: `git archive HEAD` into a `releases/<sha>/`-shaped directory under the runner's temp root (not just any scratch path — `ops/identity.py:installed_release_root()` only trusts a release's identity when the archived tree's grandparent directory is literally named `releases`, the same structural fact `release.sh`'s own layout guarantees, so `finance selfcheck`'s `installed_release_id` resolves for real instead of silently reporting `None`), so `RELEASE_ID`'s `export-subst` placeholder is substituted exactly as it would be for a real release, `uv sync --no-editable` to build that release's own venv, `alembic upgrade head` from that venv, and `finance selfcheck --json` — all against a throwaway `finance_ci_preflight` database in a fresh GitHub Actions Postgres service container, never `finance_dev`, never anything persistent (the same pattern `integration-tests`/`security-tests`/`agent-evals` already use for their own throwaway databases — GitHub Actions' own test infrastructure, unrelated to and unchanged by ADR-019). `production-deploy` now depends on `release-preflight` (previously `staging-smoke`).
 
 ## `finops deploy` / `rollback` / `restart`
 
@@ -83,8 +88,9 @@ So `ops/status.py:probe_release` still compares an identity that must originate 
 
 ## Deliberately deferred
 
-- **`/opt/finance` provisioning, systemd unit files, and CI's Docker-shaped jobs redesigned.** See ADR-019's implementation-status table for the exact remaining rows; `finops deploy`/`rollback`/`restart`, Settings' explicit-prod-opt-in guard, and `deploy/scripts/release.sh` are shipped (above).
-- **A CI gate on "is this SHA safe to copy to `/opt/finance`"** — `release.sh`'s first-parent-of-`origin/main` check keeps a copy from happening at all for a ref that never merged, but that only re-derives what CI itself already decided; it is not a CI-side gate in its own right (there is no artifact for one to attach to, now that there's no image/registry). Whether one belongs at all, and what it would check beyond what the ancestry gate already does, is still open.
+- **`/opt/finance` provisioning and systemd unit files.** See ADR-019's implementation-status table for the exact remaining rows; `finops deploy`/`rollback`/`restart`, Settings' explicit-prod-opt-in guard, `deploy/scripts/release.sh`, and CI's `release-preflight` job are shipped (above).
+- **A separate CI gate on "is this SHA safe to copy to `/opt/finance`"** — resolved as "no, and it would be redundant": there is no image or registry for such a gate to attach to anymore, and `release.sh`'s own first-parent-of-`origin/main` provenance check already re-derives what CI decided about a given SHA at the one point that actually matters (release-copy time) — a separate Docker-shaped CI gate duplicating that ancestry check would add a second place for the same decision to go stale, not a new guarantee. What CI *does* still verify, every PR and every push to `main`, is `release-preflight` (above): that the artifact `release.sh` would produce for a given SHA actually installs and runs. That is a different, narrower claim than provenance ("is this SHA safe to copy") — it answers "would this SHA work if copied," which is exactly the regression ADR-019 flagged (a broken migration or venv reaching `/opt/finance` uncaught) and exactly the gap dropping the image-shaped jobs without a replacement would have reopened.
+- **Upgrade-in-place migration coverage (QA-17) — dropped, not deferred.** The old `migration-preflight` job applied the *previously published release's* migrations before the new ones, because "a migration that only works from nothing can still break a real upgrade-in-place; a fresh DB can't catch that" (QA-17). ADR-019's replacement `release-preflight` migrates a *fresh empty* `finance_ci_preflight` database only, so it still catches a migration that breaks from nothing but no longer catches one that breaks on top of the schema the previous release actually has (e.g. `ADD COLUMN ... NOT NULL` without a default on a populated table). **Required before the first production deploy** — either restore a `git archive HEAD~1` previous-release step in `release-preflight` (cheap, mirrors the old job's structure without any image) or explicitly accept the gap here. Until then, a real upgrade-in-place migration failure would first surface at the owner's `finops deploy` against `finance_prod`.
 - **Real production provisioning on the shared VPS** — the engineering workspace's own host is the intended production host (ADR-007/ADR-010/ADR-019), but `/opt/finance`, its Unix user, and `finance_prod` don't exist yet. `docs/runbooks/deploy.md` documents the procedure.
 - **Milestone 8's webhook endpoint** — was scaffolded via a Compose `caddy` service under the old design; a follow-up session needs a bare-metal equivalent (a host-installed reverse proxy, or Python serving TLS directly) once this milestone's rewrite lands.
 - **A "canary"/gradual rollout mechanism** — out of scope for a single-user, single-instance application; all-or-nothing health-gated promotion is the appropriate amount of ceremony here (CLAUDE.md: don't add complexity without a demonstrated need).

@@ -32,9 +32,65 @@ const SECRET_READ_PATTERNS = [
   /(^|\/)\.plaid\//,
 ]
 
-function runHook(repoRoot, script, payload) {
+function gitCurrentBranch(repoRoot) {
+  const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], {
+    encoding: "utf8",
+  })
+  if (result.status !== 0) return ""
+  return (result.stdout || "").trim()
+}
+
+// Inline stand-in for .claude/hooks/guard-protected-branch.sh, used only while
+// that hook script is absent from this checkout (it exists only on PR #15's
+// branch). Blocks the two actions that write history to main — `git commit`
+// while on main, and any `git push` whose target resolves to main — and fails
+// closed (blocks) when the current branch cannot be determined. Everything
+// else passes.
+function enforceProtectedBranchShim(repoRoot, command) {
+  const isCommit = /(^|[;&|]\s*)git\s+commit(\s|$)/.test(command)
+  const isPush = /(^|[;&|]\s*)git\s+push(\s|$)/.test(command)
+  if (!isCommit && !isPush) return { status: 0, stdout: "", stderr: "" }
+
+  const branch = gitCurrentBranch(repoRoot)
+  const block = (reason) => ({
+    status: 2,
+    stdout: "",
+    stderr:
+      `BLOCKED: ${reason}\n` +
+      "CLAUDE.md's working agreement: branch per unit of work, PR into main. No direct commits to main.\n" +
+      "Class A changes merge via .opencode/scripts/merge-class-a.sh (a gh pr merge, not a local push). Class B/C wait for the owner.",
+  })
+
+  if (isCommit) {
+    if (branch === "main") return block("attempted 'git commit' while checked out on main.")
+    if (branch === "") {
+      return block(
+        "attempted 'git commit' but the current branch could not be determined " +
+          "(guard-protected-branch.sh is missing) — failing closed rather than risk a commit to main.",
+      )
+    }
+    return { status: 0, stdout: "", stderr: "" }
+  }
+
+  const pushTargetsMain =
+    /(^|[;&|]\s*)git\s+push\b.*\b(origin\s+main\b|main:main\b|HEAD:main\b|HEAD:refs\/heads\/main\b|refs\/heads\/main\b)/.test(command)
+  if (pushTargetsMain) return block("attempted 'git push' with main as the explicit target.")
+  if (branch === "main") return block("attempted 'git push' while checked out on main.")
+  if (branch === "") {
+    return block(
+      "attempted 'git push' but the current branch could not be determined " +
+        "(guard-protected-branch.sh is missing) — failing closed rather than risk a push to main.",
+    )
+  }
+  return { status: 0, stdout: "", stderr: "" }
+}
+
+function runHook(repoRoot, script, payload, { ifMissing = "block" } = {}) {
   const scriptPath = path.join(repoRoot, ".claude", "hooks", script)
   if (!existsSync(scriptPath)) {
+    if (typeof ifMissing === "function") {
+      return ifMissing()
+    }
     throw new Error(
       `BLOCKED: guard script '.claude/hooks/${script}' is missing — refusing to run unguarded rather than failing open.`,
     )
@@ -103,7 +159,9 @@ export async function Guards({ directory, worktree }) {
           cwd: repoRoot,
         })
         blockOrPass(
-          runHook(repoRoot, "guard-protected-branch.sh", payload),
+          runHook(repoRoot, "guard-protected-branch.sh", payload, {
+            ifMissing: () => enforceProtectedBranchShim(repoRoot, command),
+          }),
           "shell command",
         )
       }
