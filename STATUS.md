@@ -5,22 +5,34 @@ this branch (`status-and-opencode`, itself `origin/main` with no divergence). Ev
 was observed directly — a command run, a file read, `gh`/`git` queried — not carried over from
 `README.md`, the handoff, or memory. See each line's citation.
 
-Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode.json`,
-`.opencode/` (the OpenCode harness port) and a stray `tmux-client-13198.log`.
+Uncommitted in this working tree, unrelated to app state: a `.gitignore` `qa-pg/` line and a stray
+`tmux-client-13198.log`. (`AGENTS.md`, `opencode.json`, and `.opencode/` are tracked on `main` now,
+not uncommitted.)
 
 ## Last session
 
-**2026-09-16 — `main` @ `79773a3`**
+**2026-09-16 — `workflow-rules` (2 commits over `79773a3`; owner-merge by path)**
 
-- `main` now includes the squash merge of PR #23 (`79773a3`).
-- Docker/Compose artifacts deleted; CI's Docker-shaped jobs removed (`needs:` gates, `pipefail` on
-  the archive step); `guards.js` fails closed for `main` when the hook file is missing.
-- QA-17 (upgrade-in-place) deferred, recorded in `docs/ADR-019` — required before the first prod
-  deploy.
-- Security findings 3–5 still open: `selfcheck` identity assert; backup/restore + systemd still
-  reference Compose; stale comments.
-- Next: ADR-019 leftovers — bare-metal systemd units + `Settings.production_units`; then
-  owner-performed `/opt/finance` provisioning.
+- Branch `workflow-rules` off `origin/main` (`79773a3`); cherry-picked `959dbac` (the post-#23
+  STATUS.md record) so it survives on a branch.
+- `AGENTS.md` gained the unattended-session rules: boot-from-git stale-branch check; worktree
+  recovery only via `git show`/`git cherry-pick`; harness-config caching (restart OpenCode after
+  editing `guards.js` or a `model:` pin; guards fail closed; no stub hooks on disk); reviewer
+  integrity (only a subagent's real output is a review, a failed dispatch is recorded and the
+  session stops); the Kimi specialist gate is Class B-only; stop cleanly when blocked. The changed
+  Git bullets are mirrored into `CLAUDE.md`.
+- Merge paths are now explicit: Class A via `merge-class-a.sh`; Class B (or any PR the script
+  refuses on a reserved path) is owner-merged with `gh pr merge` after green CI.
+- `merge-class-a.sh`'s `sensitive_pattern` now also reserves `AGENTS.md`; no other script behavior
+  changed.
+- **This change is owner-merge by path** (`AGENTS.md`/`CLAUDE.md`). The agent stops at the PR — it
+  is not merged from this session. (`.opencode/` is *not* in the script's path screen today, so a
+  harness-only PR would still pass it; tracked as a follow-up, not fixed here.)
+- Still true from the prior session: `main` includes PR #23 (`79773a3`); QA-17 (upgrade-in-place)
+  deferred in `docs/ADR-019`, required before first prod deploy; security findings 3–5 open
+  (`selfcheck` identity assert; backup/restore + systemd reference Compose; stale comments).
+- Next engineering: security findings 3–5, then ADR-019 leftovers (bare-metal systemd units +
+  `Settings.production_units`), then owner-performed `/opt/finance` provisioning.
 - Do not touch PR #15, `/opt/finance`, or `finance_ci_preflight` in an agent session.
 
 ## 1. What works now

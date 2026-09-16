@@ -69,7 +69,9 @@ The runtime financial agent gets **semantic, parameterized tools** only — `get
 
 Class A auto-merge is the standing default whenever a session is asked to continue the milestone backlog autonomously (handoff §34) — interactive, resumed, or scheduled makes no difference. Full contract, including what to do when nobody is present to answer a blocker: ADR-017 and handoff §32.
 
-**The merge itself is mechanical, not just a judgment call**: `gh pr merge` sits in `opencode.json`'s `permission.bash` ask list — the sanctioned path from an autonomous session to an actual Class A merge is `.opencode/scripts/merge-class-a.sh <PR>`, which independently re-verifies mergeable state, that every required check is actually green, and that the diff doesn't touch a path this repo treats as inherently non-Class-A (migrations, `deploy/`, `.claude/`, ADRs, the Plaid/agent boundaries, or the rule-defining docs themselves) before it merges anything.
+**The merge itself is mechanical, not just a judgment call**: `gh pr merge` sits in `opencode.json`'s `permission.bash` ask list — the sanctioned path from an autonomous session to an actual Class A merge is `.opencode/scripts/merge-class-a.sh <PR>`, which independently re-verifies mergeable state, that every required check is actually green, and that the diff doesn't touch a path this repo treats as inherently non-Class-A (migrations, `deploy/`, `.claude/`, ADRs, the Plaid/agent boundaries, or the rule-defining docs themselves — `CLAUDE.md`, `AGENTS.md`, `CLAUDE_FINANCE_APP_HANDOFF.md`, `docs/security-model.md`) before it merges anything.
+
+**When the script refuses a PR, that is the mechanism working, not a bug to route around.** A Class B PR — or any PR the script refuses on a reserved path — is merged by the **owner** with `gh pr merge` after every required check is green. The agent's job ends at the open PR: it does not merge, does not ask a parent model to merge, and does not edit the script's reserved-path list to make its own change mergeable.
 
 ## Delegation
 
@@ -85,6 +87,17 @@ Use the Skills in `.opencode/skills/` for recurring procedures instead of re-der
 memory each time: `autonomous-continuation` (backlog pickup, classification, session lifecycle),
 `safe-migration`, `plaid-sync-review`, `release-readiness`, and `pre-merge-review` (mandatory
 fresh-context correctness pass before any unit of work — Class A included — is called done).
+
+## Session lifecycle (unattended-safe)
+
+These hold when nobody is watching a tool prompt. Each exists because the failure actually happened here.
+
+- **Boot from git, never from memory.** At session start run `git fetch origin`, `git status`, `git branch --show-current`, `gh pr list --state open`. Never start work on a branch behind `origin/main`; branch fresh off latest `origin/main` instead. (A checkout once ran 28 commits behind against a mismatched database schema.)
+- **Recover worktree work via git, never by copying files.** If work exists only in a dirty/locked worktree, `git show` the commit or `git cherry-pick` it onto a fresh branch. Never copy files out of a locked worktree — it can carry uncommitted, half-applied state that silently reverts already-merged fixes.
+- **Harness config is cached at OpenCode start.** Plugins (`guards.js`) and subagent `model:` pins load once, so restart OpenCode after editing either and do not trust a mid-session edit. Guard changes must fail closed — never change a guard to skip or fail open — and never leave a temporary hook stub on disk or commit one.
+- **Only a subagent's actual output is a review.** The parent session must never impersonate `code-reviewer`, `security-reviewer`, or `qa-adversarial`, or report a review that did not run. If a mandated reviewer fails to dispatch (e.g. a provider auth error), the review did not happen: record the blocker in `STATUS.md` (or `OVERNIGHT.md` for an overnight run) and stop — never self-review in the authoring context and proceed as if the gate passed.
+- **The Kimi specialist gate is Class B only.** `security-reviewer` + `qa-adversarial` (both `moonshotai/kimi-k3`) are required for every Class B PR and are not widened to Class A; `pre-merge-review`'s `code-reviewer` is the every-class gate. Verify the model pin matches the provider actually available before calling a review complete.
+- **When blocked with nobody present, stop cleanly.** No idle waits, no polling, no loop-retries, no invented or self-approved gates. Record the blocker and the recommended default (PR description, commit message, or `gh issue create`), finish any other unblocked work, and end the session as exactly one of: a merged Class A PR, an open PR, or a durable note (ADR-017, handoff §32).
 
 ## Context discipline
 
@@ -119,8 +132,8 @@ fresh-context correctness pass before any unit of work — Class A included — 
 - New work on a branch off latest `origin/main`.
 - `git fetch origin` before branch or cherry-pick.
 - Open PRs with `gh pr create --base main`.
-- Merge only via `.opencode/scripts/merge-class-a.sh` (not `gh pr merge`).
-- Do not work in or copy from dirty/locked worktrees.
+- Merge by class: **Class A** only via `.opencode/scripts/merge-class-a.sh` — never bare `gh pr merge` from an agent session (it sits in the ask list and stalls unattended). **Class B, and any PR the script refuses on a reserved path, is merged by the owner with `gh pr merge` after green CI**; the agent stops at the open PR and never merges it. The script's refusal is the mechanism, not an obstacle.
+- Do not work in or copy from dirty/locked worktrees; recover their work via `git show`/`git cherry-pick` (see Session lifecycle).
 - Read STATUS.md at session start. If it disagrees with git, trust git and fix STATUS.md.
 - After each task, update STATUS.md "Last session".
 

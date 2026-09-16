@@ -89,8 +89,8 @@ Use the subagents in `.claude/agents/` for their specialties. Never let the suba
 - New work on a branch off latest `origin/main`.
 - `git fetch origin` before branch or cherry-pick.
 - Open PRs with `gh pr create --base main`.
-- Merge only via `.opencode/scripts/merge-class-a.sh` (not `gh pr merge`).
-- Do not work in or copy from dirty/locked worktrees.
+- Merge by class: **Class A** only via `.opencode/scripts/merge-class-a.sh` — never bare `gh pr merge` from an agent session (it sits in the ask list and stalls unattended). **Class B, and any PR the script refuses on a reserved path, is merged by the owner with `gh pr merge` after green CI**; the agent stops at the open PR and never merges it. The script's refusal is the mechanism, not an obstacle.
+- Do not work in or copy from dirty/locked worktrees; recover their work via `git show`/`git cherry-pick`.
 - Read STATUS.md at session start. If it disagrees with git, trust git and fix STATUS.md.
 - After each task, update STATUS.md "Last session".
 
