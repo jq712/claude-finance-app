@@ -10,19 +10,20 @@ Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode
 
 ## Last session
 
-**2026-09-15 — `docker-removal-audit` @ `32d0d23`**
+**2026-09-16 — `docker-removal-audit` @ `b0f585c`**
 
-- Landed: reviewer agent model pins moved from `kimi-for-coding/k3` to `moonshotai/kimi-k3` in
-  `.opencode/agents/code-reviewer.md`, `security-reviewer.md`, `qa-adversarial.md`. DeepSeek pins
-  (`opencode.json`, `AGENTS.md`) and the app runtime `AGENT_PROVIDER` are unchanged; no other agents
-  touched. A repo-wide md/json search found no other file naming these agents beside a model id.
-- Prior session (carried): `## Git` section added to `AGENTS.md` + `CLAUDE.md` (`3f4a7fa`);
-  ADR-019 Docker removal cherry-picked (`9f9b7c2`); Docker-removal CI fixes at `0438b0e`
-  (`production-deploy` `needs` all 8 push-to-main jobs; `release-preflight` archive step
-  `shell: bash` + `set -euo pipefail`). `code-reviewer` dispatch was blocked on an invalid/expired
-  Kimi API key (`invalid_authentication_error`).
-- Next command: retry `code-reviewer` (now pinned to `moonshotai/kimi-k3`); then Class B
-  `security-reviewer` + `qa-adversarial` before any PR to `main`.
+- Class B `security-reviewer` (moonshotai/kimi-k3) completed on `docker-removal-audit` vs `main`:
+  verdict "fix", 5 findings, no Class C escalation. This session fixed findings 1 and 2 only, per
+  the owner; findings 3–5 left open.
+- Finding 1 (`guards.js` fail-open): a missing `.claude/hooks/guard-protected-branch.sh` no longer
+  skips branch protection. `enforceProtectedBranchShim` evaluates the bash command inline and blocks
+  `git commit` while on `main` and any `git push` targeting `main`, failing closed when the current
+  branch cannot be determined. No stub hook file added.
+- Finding 2 (dropped QA-17 gate): recorded the lost upgrade-in-place migration coverage in
+  `docs/deployment.md` "Deliberately deferred" and ADR-019 "Revisit when" as required before the
+  first production deploy.
+- Next command: owner decision on whether to fix findings 3–5; then `qa-adversarial` +
+  `pre-merge-review` before any PR to `main`. Nothing pushed, no PR, no merge.
 
 ## 1. What works now
 
