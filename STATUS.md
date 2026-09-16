@@ -27,7 +27,16 @@ not uncommitted.)
   `git commit --amend` or `-n`/`--no-verify`.
 - **Owner-merge by path** (`AGENTS.md`/`CLAUDE.md`). The agent stops at the open PR; the owner
   merges with `gh pr merge` after green CI. Not pushed and not merged from this session.
-- Next: review (code-reviewer + security-reviewer) then owner PR merge.
+- **BLOCKED — the review gate did not run.** Dispatching `code-reviewer` failed before producing
+  any output: `moonshotai/kimi-k3` returned "account ... is suspended due to insufficient
+  balance". Per AGENTS.md's reviewer-integrity rule a failed dispatch is not a review, so
+  `security-reviewer`/`qa-adversarial` (same provider) were not attempted and the authoring
+  context did not self-review. Change is committed on `sanctioned-commit` (`615300f`), **not
+  pushed**.
+- **Next (owner):** restore the Kimi provider balance, then run the `pre-merge-review` gate
+  (`code-reviewer` + `security-reviewer`/`qa-adversarial`) before opening/merging the PR. The
+  wrapper's refusals were exercised directly (no-arg/2-arg/empty/`-`-leading/`main`/detached HEAD
+  all refused; a valid commit succeeded) — that is evidence, not a substitute for the review.
 - Still true from the prior session: `main` includes PR #23 (`79773a3`); QA-17 (upgrade-in-place)
   deferred in `docs/ADR-019`, required before first prod deploy; security findings 3–5 open. Do
   not touch PR #15, `/opt/finance`, or `finance_ci_preflight` in an agent session.
