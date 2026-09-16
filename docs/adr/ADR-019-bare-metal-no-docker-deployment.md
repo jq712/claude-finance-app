@@ -93,3 +93,5 @@ Production processes run under systemd units whose `ExecStart=` invokes the rele
 ## Revisit when
 
 As the follow-up implementation session builds this out, update the "Implementation status" table above to move items from "Not shipped" to "Shipped" — matching the pattern ADR-016 already established. Once every row is shipped, remove the table and this note.
+
+One prior CI guarantee was dropped in the same Docker-removal change without a written replacement: the old `migration-preflight` job proved migrations apply cleanly on top of the *previously published release's* schema (QA-17 — "a migration that only works from nothing can still break a real upgrade-in-place"), while `release-preflight` only migrates a fresh empty database. **Required before the first production deploy**: restore that upgrade-in-place coverage (see `docs/deployment.md`'s "Deliberately deferred").
