@@ -10,20 +10,14 @@ Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode
 
 ## Last session
 
-**2026-09-16 — `docker-removal-audit` @ `b0f585c`**
+**2026-09-16 — `docker-removal-audit` @ `8e75d3c`**
 
-- Class B `security-reviewer` (moonshotai/kimi-k3) completed on `docker-removal-audit` vs `main`:
-  verdict "fix", 5 findings, no Class C escalation. This session fixed findings 1 and 2 only, per
-  the owner; findings 3–5 left open.
-- Finding 1 (`guards.js` fail-open): a missing `.claude/hooks/guard-protected-branch.sh` no longer
-  skips branch protection. `enforceProtectedBranchShim` evaluates the bash command inline and blocks
-  `git commit` while on `main` and any `git push` targeting `main`, failing closed when the current
-  branch cannot be determined. No stub hook file added.
-- Finding 2 (dropped QA-17 gate): recorded the lost upgrade-in-place migration coverage in
-  `docs/deployment.md` "Deliberately deferred" and ADR-019 "Revisit when" as required before the
-  first production deploy.
-- Next command: owner decision on whether to fix findings 3–5; then `qa-adversarial` +
-  `pre-merge-review` before any PR to `main`. Nothing pushed, no PR, no merge.
+- Class B `security-reviewer` (moonshotai/kimi-k3) verdict: **merge** on `b0f585c`; no Class C
+  escalation.
+- Finding 1 fixed in `guards.js`; finding 2 recorded in `docs/deployment.md` and ADR-019.
+- Findings 3–5 still follow-up.
+- Next: `git push -u origin docker-removal-audit`, then `gh pr create --base main`. Do not use
+  `gh pr merge`; merge later with `.opencode/scripts/merge-class-a.sh`.
 
 ## 1. What works now
 
