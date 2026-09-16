@@ -62,7 +62,7 @@ fi
 # first place all require a human's own gh pr merge click, however trivial
 # any individual line looks. This is what makes this very change permanently
 # ineligible for the mechanism it introduces.
-sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$'
+sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$'
 files=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null) ||
   fail "could not read changed files for PR #$pr"
 if printf '%s\n' "$files" | grep -qE "$sensitive_pattern"; then

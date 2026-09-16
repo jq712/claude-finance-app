@@ -5,19 +5,35 @@ this branch (`status-and-opencode`, itself `origin/main` with no divergence). Ev
 was observed directly — a command run, a file read, `gh`/`git` queried — not carried over from
 `README.md`, the handoff, or memory. See each line's citation.
 
-Uncommitted in this working tree, unrelated to app state: `AGENTS.md`, `opencode.json`,
-`.opencode/` (the OpenCode harness port) and a stray `tmux-client-13198.log`.
+Uncommitted in this working tree, unrelated to app state: a `.gitignore` `qa-pg/` line and a stray
+`tmux-client-13198.log`. (`AGENTS.md`, `opencode.json`, and `.opencode/` are tracked on `main` now,
+not uncommitted.)
 
 ## Last session
 
-**2026-09-16 — `docker-removal-audit` @ `8e75d3c`**
+**2026-09-16 — `workflow-rules` (2 commits over `79773a3`; owner-merge by path)**
 
-- Class B `security-reviewer` (moonshotai/kimi-k3) verdict: **merge** on `b0f585c`; no Class C
-  escalation.
-- Finding 1 fixed in `guards.js`; finding 2 recorded in `docs/deployment.md` and ADR-019.
-- Findings 3–5 still follow-up.
-- Next: `git push -u origin docker-removal-audit`, then `gh pr create --base main`. Do not use
-  `gh pr merge`; merge later with `.opencode/scripts/merge-class-a.sh`.
+- Branch `workflow-rules` off `origin/main` (`79773a3`); cherry-picked `959dbac` (the post-#23
+  STATUS.md record) so it survives on a branch.
+- `AGENTS.md` gained the unattended-session rules: boot-from-git stale-branch check; worktree
+  recovery only via `git show`/`git cherry-pick`; harness-config caching (restart OpenCode after
+  editing `guards.js` or a `model:` pin; guards fail closed; no stub hooks on disk); reviewer
+  integrity (only a subagent's real output is a review, a failed dispatch is recorded and the
+  session stops); the Kimi specialist gate is Class B-only; stop cleanly when blocked. The changed
+  Git bullets are mirrored into `CLAUDE.md`.
+- Merge paths are now explicit: Class A via `merge-class-a.sh`; Class B (or any PR the script
+  refuses on a reserved path) is owner-merged with `gh pr merge` after green CI.
+- `merge-class-a.sh`'s `sensitive_pattern` now also reserves `AGENTS.md`; no other script behavior
+  changed.
+- **This change is owner-merge by path** (`AGENTS.md`/`CLAUDE.md`). The agent stops at the PR — it
+  is not merged from this session. (`.opencode/` is *not* in the script's path screen today, so a
+  harness-only PR would still pass it; tracked as a follow-up, not fixed here.)
+- Still true from the prior session: `main` includes PR #23 (`79773a3`); QA-17 (upgrade-in-place)
+  deferred in `docs/ADR-019`, required before first prod deploy; security findings 3–5 open
+  (`selfcheck` identity assert; backup/restore + systemd reference Compose; stale comments).
+- Next engineering: security findings 3–5, then ADR-019 leftovers (bare-metal systemd units +
+  `Settings.production_units`), then owner-performed `/opt/finance` provisioning.
+- Do not touch PR #15, `/opt/finance`, or `finance_ci_preflight` in an agent session.
 
 ## 1. What works now
 
@@ -191,20 +207,16 @@ until that database is cleaned up or the cluster is given a fresh volume.
   long-running `app` service; `deploy/compose.yaml`'s `app` service defines
   `command: ["finance", "status"]` with `restart: unless-stopped`.
 
-## 6. Next 5 development tasks, in order
+## 6. Next 4 development tasks, in order
 
 PR #15 is intentionally excluded — `CLAUDE.md` says not to touch it unless explicitly asked.
 
-**1. Land the Docker removal.** Cherry-picked `835c63a` onto `docker-removal-audit` (`9f9b7c2`) and
-fixed its two audit defects (`0438b0e`): `production-deploy` re-wired to gate on every push-to-main
-job, and `release-preflight`'s archive step now uses `shell: bash` + `set -euo pipefail`. Remaining:
-fresh-context code review, then Class B `security-reviewer` + `qa-adversarial`, then push the branch
-and open a PR. *Class B: rewrites CI and deletes the dev-environment definition.*
-Files to read first: `.github/workflows/ci.yml`, `docs/deployment.md`,
-`docs/adr/ADR-019-bare-metal-no-docker-deployment.md`, `tests/unit/test_deploy_topology_regression.py`,
-`tests/conftest.py`.
+**Docker removal is done.** PR #23 squash-merged to `main` (`79773a3`): Docker/Compose artifacts
+deleted, CI's Docker-shaped jobs redesigned (`needs:` gates, `pipefail` on the archive step), and
+`guards.js` fails closed for `main` when its hook file is missing. QA-17 (upgrade-in-place) is
+deferred in `docs/ADR-019` and must be resolved before the first prod deploy. *Class B.*
 
-**2. Write the bare-metal systemd units; wire `Settings.production_units`.** ADR-019's last
+**1. Write the bare-metal systemd units; wire `Settings.production_units`.** ADR-019's last
 "Not shipped" row. Rewrite `deploy/systemd/*.service` to invoke
 `/opt/finance/current/.venv/bin/{finance,finops}` instead of `docker compose run`, keeping the
 existing hardening block; then `ops/host.py:run_systemctl` stops skipping and `finops deploy` can
@@ -214,7 +226,7 @@ Files to read first: `deploy/systemd/` (all units), `src/finance_app/ops/host.py
 `src/finance_app/config/settings.py`, `deploy/scripts/with-production-env.sh`,
 `deploy/scripts/release.sh`, `docs/runbooks/deploy.md`, `docs/adr/ADR-015-backup-encryption-gpg-symmetric.md`.
 
-**3. Fix QA-21 and QA-23** (§4.6) — the two remaining strict xfails, both real defects with a
+**2. Fix QA-21 and QA-23** (§4.6) — the two remaining strict xfails, both real defects with a
 concrete failure scenario already written as a test. Fixing QA-23 (the migration 0005 unique index)
 is itself a Class B migration change and should follow `.claude/skills/safe-migration` once that
 tooling is available, or its equivalent checklist by hand otherwise. *Class B.*
@@ -222,7 +234,7 @@ Files to read first: `tests/integration/test_deploy_gate_regression.py` (both xf
 `src/finance_app/ops/release.py` (`mark_healthy`, `_try_acquire_promotion_lock`),
 `migrations/versions/0005_a1c3e9f4d2b7_release_rollback_safety.py`.
 
-**4. Owner-performed production provisioning** (ADR-019 row 2 — explicitly out of scope for an
+**3. Owner-performed production provisioning** (ADR-019 row 2 — explicitly out of scope for an
 engineering session, and the hard gate on Milestone 7 finishing). Create `finance_prod` on the
 5433 cluster, the `finance-prod` Unix user, `/opt/finance/{releases,current,.env}` (mode 600,
 `FINANCE_ENV=production`), mint the systemd encrypted credentials, then run
@@ -232,7 +244,7 @@ Files to read first: `docs/runbooks/deploy.md`, ADR-019 §"Two environment files
 `docs/adr/ADR-010-production-secrets-excluded-from-engineering.md`,
 `src/finance_app/config/env.py`, `deploy/scripts/release.sh`, `docs/runbooks/restore-backup.md`.
 
-**5. Milestone 8 — Plaid webhook.** First milestone with zero work started. Minimal authenticated
+**4. Milestone 8 — Plaid webhook.** First milestone with zero work started. Minimal authenticated
 endpoint, `SYNC_UPDATES_AVAILABLE` handling, concurrency via the Postgres advisory lock
 `plaid/sync.py` already implements (`_single_sync_lock`) — §6.4 explicitly forbids adding
 Redis/Celery for this — host-installed Caddy, daily timer retained as the reconciliation fallback
