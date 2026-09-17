@@ -129,6 +129,7 @@ These hold when nobody is watching a tool prompt. Each exists because the failur
 
 - Use `gh` for PRs, checks, and branch delete.
 - Never commit or push `main`. Never force-push.
+- Unattended commits go **only** through `.opencode/scripts/commit.sh "msg"` — it refuses `main`, detached HEAD, empty messages, and messages beginning with `-`, and runs exactly `git commit -m "$1"`. Never `git commit --amend` and never `git commit -n`/`--no-verify`; raw `git commit` stays `ask` in `opencode.json`.
 - New work on a branch off latest `origin/main`.
 - `git fetch origin` before branch or cherry-pick.
 - Open PRs with `gh pr create --base main`.

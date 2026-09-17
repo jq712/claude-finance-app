@@ -32,6 +32,19 @@ const SECRET_READ_PATTERNS = [
   /(^|\/)\.plaid\//,
 ]
 
+// The one sanctioned unattended commit path (.opencode/scripts/commit.sh).
+// It is a script, not a raw `git commit`, so it never matches the commit
+// regex below; this recognition states the sanctioned boundary in one place.
+// It is deliberately NOT a skip for raw `git commit` -- that stays guarded --
+// and it matches only a bare, un-chained invocation, so a command that
+// appends its own `git commit` still falls through to the guard.
+const SANCTIONED_COMMIT =
+  /^\s*(?:\.\/)?\.opencode\/scripts\/commit\.sh\s+(?:"[^"]*"|'[^']*'|[^\s;&|`$()<>\\]+)\s*$/
+
+function isSanctionedCommit(command) {
+  return SANCTIONED_COMMIT.test(command)
+}
+
 function gitCurrentBranch(repoRoot) {
   const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], {
     encoding: "utf8",
@@ -47,6 +60,12 @@ function gitCurrentBranch(repoRoot) {
 // closed (blocks) when the current branch cannot be determined. Everything
 // else passes.
 function enforceProtectedBranchShim(repoRoot, command) {
+  // The sanctioned wrapper enforces its own branch checks (it refuses main and
+  // detached HEAD) and accepts exactly one message argument. Recognized only
+  // as a bare, un-chained invocation; anything else falls through so a raw
+  // `git commit` sharing the command line is still evaluated below.
+  if (isSanctionedCommit(command)) return { status: 0, stdout: "", stderr: "" }
+
   const isCommit = /(^|[;&|]\s*)git\s+commit(\s|$)/.test(command)
   const isPush = /(^|[;&|]\s*)git\s+push(\s|$)/.test(command)
   if (!isCommit && !isPush) return { status: 0, stdout: "", stderr: "" }

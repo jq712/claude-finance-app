@@ -15,6 +15,7 @@
       "*secrets/*": "deny",
       "*.env*": "ask",
       "git commit*": "ask",
+      ".opencode/scripts/commit.sh *": "allow",
       "git push*": "ask",
       "gh pr merge*": "ask",
       "psql*": "ask",
