@@ -40,3 +40,6 @@ node_modules/
 # Claude Code — share settings.json and agents/skills, keep personal overrides local
 .claude/settings.local.json
 qa-pg/
+
+# Orchestrator runtime state (AGENTS.md §3) — untracked by design; templates live in .orchestrator.example/
+.orchestrator/
