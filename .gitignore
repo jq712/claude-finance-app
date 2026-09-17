@@ -39,3 +39,4 @@ node_modules/
 
 # Claude Code — share settings.json and agents/skills, keep personal overrides local
 .claude/settings.local.json
+qa-pg/
