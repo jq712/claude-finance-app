@@ -19,15 +19,21 @@
 #       merge may change this.
 #   2   policy refusal -- the script deliberately declined. Exactly two
 #       conditions reach it: a changed path matched the reserved-path
-#       pattern, or mergeable is CONFLICTING. Both persist until the
-#       branch or base changes, so it is deterministic; re-running gives
-#       2 again. No merge was attempted.
+#       pattern, or mergeable is CONFLICTING. Both depend only on the
+#       PR's changed files and the branch/base relationship, so neither
+#       is transient: they persist until the branch or base changes.
+#       Re-running returns 2 only if the gates ahead of the failing one
+#       still pass -- the path screen runs third, so a reserved-path PR
+#       whose checks have not all reported returns 3, not 2. No merge
+#       was attempted.
 #   3   technical failure -- a command the script depends on failed or
-#       produced unreadable output (network, auth, gh error, git error,
-#       missing file), or the PR's state is not yet determinable:
-#       mergeable not yet computed, too few checks reported, a check not
-#       yet SUCCESS/SKIPPED. The PR may or may not have been merged:
-#       query it, never re-run this script.
+#       produced unreadable output (gh missing, gh error, network,
+#       auth), or the PR's state is not yet determinable (mergeable not
+#       yet computed, too few checks reported, a check still pending),
+#       or a reported check is not SUCCESS/SKIPPED, which is a red PR
+#       rather than a not-yet one. Only the `gh pr merge` failure path
+#       leaves the merge outcome in doubt; every other path exits before
+#       any merge is attempted. Query the PR, never re-run this script.
 #   64  usage error -- bad arguments. No merge was attempted.
 # No other exit code is produced by this script; unhandled command failures
 # are mapped to 3 by the ERR trap below.
@@ -110,7 +116,8 @@ if printf '%s\n' "$files" | grep -qE "$sensitive_pattern"; then
   exit 2
 fi
 
-echo "PR #$pr: mergeable, $check_count checks reported and green, no reserved paths touched." || true
+echo "PR #$pr: mergeable, $check_count checks reported and green, no reserved paths touched." ||
+  fail "could not write the status line for PR #$pr -- refusing to merge blind"
 gh pr merge "$pr" --squash ||
   fail "gh pr merge exited nonzero for PR #$pr -- merge outcome unknown, do not re-run"
 # The merge landed. No cleanup happens here (AGENTS.md §13.7 owns it), and
