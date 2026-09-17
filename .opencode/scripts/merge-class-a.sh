@@ -17,21 +17,25 @@
 # caller interprets the result by exit code only; stderr text is diagnostic.
 #   0   merged -- `gh pr merge` succeeded. Nothing that happens after the
 #       merge may change this.
-#   2   policy refusal -- the script deliberately declined (reserved path,
-#       wrong class, unsafe diff, any check the script itself defines).
-#       Deterministic; re-running gives 2 again. No merge was attempted.
+#   2   policy refusal -- the script deliberately declined. Exactly two
+#       conditions reach it: a changed path matched the reserved-path
+#       pattern, or mergeable is CONFLICTING. Both persist until the
+#       branch or base changes, so it is deterministic; re-running gives
+#       2 again. No merge was attempted.
 #   3   technical failure -- a command the script depends on failed or
 #       produced unreadable output (network, auth, gh error, git error,
-#       missing file). The PR may or may not have been merged: query it,
-#       never re-run this script.
+#       missing file), or the PR's state is not yet determinable:
+#       mergeable not yet computed, too few checks reported, a check not
+#       yet SUCCESS/SKIPPED. The PR may or may not have been merged:
+#       query it, never re-run this script.
 #   64  usage error -- bad arguments. No merge was attempted.
 # No other exit code is produced by this script; unhandled command failures
 # are mapped to 3 by the ERR trap below.
-set -euo pipefail
+set -eEuo pipefail
 trap 'exit 3' ERR
 
 usage() {
-  echo "usage: $(basename "$0") <pr-number>" >&2
+  echo "usage: $(basename "$0") <pr-number>" >&2 || true
   exit 64
 }
 
@@ -41,13 +45,13 @@ pr="$1"
 
 # Policy refusal (exit 2): the script itself declined; no merge attempted.
 refuse() {
-  echo "REFUSED: $*" >&2
+  echo "REFUSED: $*" >&2 || true
   exit 2
 }
 
 # Technical failure (exit 3): a dependency failed or its output was unreadable.
 fail() {
-  echo "FAILED: $*" >&2
+  echo "FAILED: $*" >&2 || true
   exit 3
 }
 
@@ -63,21 +67,31 @@ case "$mergeable" in
 esac
 
 # --- 2. Every reported check is green, and enough checks were reported -----
-# SKIPPED is accepted: this repo's own CI intentionally skips its CD-stage
-# jobs (publish-image, migration-preflight, staging-smoke, production-deploy)
-# on pull_request events -- they only run on push to main -- so requiring
-# SUCCESS on those would make no PR ever mergeable. The count floor guards
-# the "checks haven't populated yet" race: ADR-017 says never merge on a
-# missing check, and an empty or too-small list looks exactly like one.
+# SKIPPED is accepted because ci.yml's ten jobs do not all run on every PR:
+# production-deploy is gated on push to main, and docs-freshness only runs
+# for a PR whose base is main. On a pull_request that does not match, each
+# of those reports SKIPPED, so demanding SUCCESS from every job would make
+# no PR ever mergeable. The other eight -- lint-and-typecheck, unit-tests,
+# integration-tests, security-tests, agent-evals, secret-scan,
+# release-preflight, dependency-scan -- run unconditionally.
+# The floor of 5 is a deliberate bare literal and this script never reads
+# it from anywhere; the pinned script hash is what enforces it, and
+# .orchestrator/pins carries min_checks_reported as documentation only.
+# It guards the "checks haven't populated yet" race: ADR-017 says never
+# merge on a missing check, and an empty or too-small list looks exactly
+# like one. That race is transient, so both gates below exit 3, never 2:
+# a state the script cannot yet evaluate is a technical failure, not a
+# deliberate refusal (AGENTS.md §14.2).
 states=$(gh pr checks "$pr" --json state --jq '.[].state' 2>/dev/null) ||
   fail "could not read checks for PR #$pr"
 check_count=$(printf '%s\n' "$states" | grep -c . || true)
 (( check_count >= 5 )) ||
-  refuse "only $check_count checks reported for PR #$pr -- looks incomplete, not green."
+  fail "only $check_count checks reported for PR #$pr -- not yet complete, not a refusal"
 if printf '%s\n' "$states" | grep -qvE '^(SUCCESS|SKIPPED)$'; then
-  echo "REFUSED: PR #$pr has a check that is not SUCCESS/SKIPPED:" >&2
+  observed=$(printf '%s\n' "$states" | grep -vE '^(SUCCESS|SKIPPED)$' | sort -u | tr '\n' ' ' || true)
+  echo "PR #$pr has a check that is not SUCCESS/SKIPPED:" >&2 || true
   gh pr checks "$pr" >&2 || true
-  exit 2
+  fail "PR #$pr check state(s) ${observed% } -- not yet complete or not green, not a refusal"
 fi
 
 # --- 3. Path screen: never auto-merge anything inherently non-Class-A ------
@@ -90,13 +104,13 @@ sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/financ
 files=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null) ||
   fail "could not read changed files for PR #$pr"
 if printf '%s\n' "$files" | grep -qE "$sensitive_pattern"; then
-  echo "REFUSED: PR #$pr touches a path reserved for human-reviewed merge:" >&2
-  printf '%s\n' "$files" | grep -E "$sensitive_pattern" >&2
-  echo "This is Class B (or workflow-tooling) by path, whatever class it was implemented under. Leave it open for the owner." >&2
+  echo "REFUSED: PR #$pr touches a path reserved for human-reviewed merge:" >&2 || true
+  printf '%s\n' "$files" | grep -E "$sensitive_pattern" >&2 || true
+  echo "This is Class B (or workflow-tooling) by path, whatever class it was implemented under. Leave it open for the owner." >&2 || true
   exit 2
 fi
 
-echo "PR #$pr: mergeable, $check_count checks reported and green, no reserved paths touched."
+echo "PR #$pr: mergeable, $check_count checks reported and green, no reserved paths touched." || true
 gh pr merge "$pr" --squash ||
   fail "gh pr merge exited nonzero for PR #$pr -- merge outcome unknown, do not re-run"
 # The merge landed. No cleanup happens here (AGENTS.md §13.7 owns it), and

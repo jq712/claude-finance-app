@@ -1,7 +1,7 @@
 repo_root: /srv/code/agent-finance-app
 origin_url: https://github.com/jq712/claude-finance-app.git
 merge_class_a_sh_path: .opencode/scripts/merge-class-a.sh
-merge_class_a_sh_sha256: 69f860f9a53071b6f75cb56171464d3622b08c3e3ced743481e353d8864d0abb
+merge_class_a_sh_sha256: 7a372c14dd6d01663ea20221e1d32e2c4789cf8a91ab1cadcd9c2e5c89215fe4
 guards_js_path: .opencode/plugins/guards.js
 guards_js_sha256: 71450e945c79fcb2d57a95aec3173f1089a9650f13c668f86a03620b92bea3df
 opencode_json_path: opencode.json
@@ -12,8 +12,10 @@ merge_class_a_sh_usage: .opencode/scripts/merge-class-a.sh <pr-number>
 merge_method: squash (gh pr merge --squash)
 reserved_paths_regex: ^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$
 class_a_criteria: PR mergeable state is MERGEABLE; at least 5 checks reported and every reported check is SUCCESS or SKIPPED; no changed path matches reserved_paths_regex
+min_checks_reported: 5 (documentation only; the script hard-codes this floor and never reads it from here -- merge_class_a_sh_sha256 is what enforces the value)
 exit_code_0: merged
 exit_code_2: policy refusal
 exit_code_3: technical failure
 exit_code_64: usage error
+exit_code_other: technical failure (timeout 124, killed 137, any code not listed above); unknown merge outcome (AGENTS.md §13.5 fail closed)
 merge_enabled: false
