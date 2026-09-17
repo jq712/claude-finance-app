@@ -1,7 +1,7 @@
 repo_root: /srv/code/agent-finance-app
 origin_url: https://github.com/jq712/claude-finance-app.git
 merge_class_a_sh_path: .opencode/scripts/merge-class-a.sh
-merge_class_a_sh_sha256: d0d55a4ea385270c1f2cdf552d0a953f0f587a15f5b7650378b73dd933fe2650
+merge_class_a_sh_sha256: 69f860f9a53071b6f75cb56171464d3622b08c3e3ced743481e353d8864d0abb
 guards_js_path: .opencode/plugins/guards.js
 guards_js_sha256: 71450e945c79fcb2d57a95aec3173f1089a9650f13c668f86a03620b92bea3df
 opencode_json_path: opencode.json
@@ -15,5 +15,5 @@ class_a_criteria: PR mergeable state is MERGEABLE; at least 5 checks reported an
 exit_code_0: merged
 exit_code_2: policy refusal
 exit_code_3: technical failure
-exit_code_64: usage
+exit_code_64: usage error
 merge_enabled: false

@@ -56,8 +56,11 @@ command -v gh >/dev/null 2>&1 || fail "gh CLI not found"
 # --- 1. No conflicts, nothing stale ----------------------------------------
 mergeable=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null) ||
   fail "could not read PR #$pr (does it exist?)"
-[[ "$mergeable" == "MERGEABLE" ]] ||
-  refuse "PR #$pr mergeable state is '$mergeable', not MERGEABLE."
+case "$mergeable" in
+  MERGEABLE)   ;;
+  CONFLICTING) refuse "PR #$pr mergeable state is 'CONFLICTING', not MERGEABLE." ;;
+  *)           fail "PR #$pr mergeable state is '$mergeable', not yet computed or unreadable" ;;
+esac
 
 # --- 2. Every reported check is green, and enough checks were reported -----
 # SKIPPED is accepted: this repo's own CI intentionally skips its CD-stage
