@@ -204,7 +204,7 @@ date -u +%Y-%m-%dT%H:%M:%SZ
 git -C <repo> status --short
 timeout 120 git -C <repo> fetch origin
 git -C <repo> merge --ff-only origin/main      # only if main is clean and behind; see below
-sha256sum merge-class-a.sh guards.js opencode.json AGENTS.md
+sha256sum .opencode/scripts/merge-class-a.sh .opencode/plugins/guards.js opencode.json AGENTS.md
 sha256sum .orchestrator/pins
 df -h .
 ```
@@ -229,6 +229,10 @@ Proceed only if **all** hold:
 - `origin` was reachable.
 
 Otherwise a circuit breaker fires (§14.3).
+
+**A nonzero exit from the hash command, or fewer than four hashes printed, is itself a preflight
+failure: set `BLOCKED`, run no merges, end the run — a file whose hash never printed is unverified,
+and matching hashes for the others are never a partial verification the run may proceed on.**
 
 **Hash mismatch on `merge-class-a.sh`, `guards.js`, `opencode.json` or `AGENTS.md` means an
 enforcement boundary or the contract itself moved: set `BLOCKED`, run no merges, end the run.** You
@@ -792,7 +796,7 @@ git status --short
 git remote -v
 ls .opencode/agents
 grep -n '^model:\|^mode:\|^permission' .opencode/agents/*.md
-sha256sum merge-class-a.sh guards.js opencode.json
+sha256sum .opencode/scripts/merge-class-a.sh .opencode/plugins/guards.js opencode.json
 df -h .
 git worktree list
 ```
