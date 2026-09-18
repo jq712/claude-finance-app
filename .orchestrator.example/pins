@@ -1,7 +1,7 @@
 repo_root: /srv/code/agent-finance-app
 origin_url: https://github.com/jq712/claude-finance-app.git
 merge_class_a_sh_path: .opencode/scripts/merge-class-a.sh
-merge_class_a_sh_sha256: 4c01457ab786be158ed0d6673e26d8732837d9102f1680868a09cd07132d40bc
+merge_class_a_sh_sha256: 1150a34a33747187714a8fce1c9195f4c46234bfe7957c26474e10e1d3d5f919
 guards_js_path: .opencode/plugins/guards.js
 guards_js_sha256: 71450e945c79fcb2d57a95aec3173f1089a9650f13c668f86a03620b92bea3df
 opencode_json_path: opencode.json
@@ -9,11 +9,13 @@ opencode_json_sha256: 6642e379e2abcd5b76b27bb92bbecd9428e83bae23b3275052e1967ec6
 agents_md_path: AGENTS.md
 agents_md_sha256: 114735250d2db461b333d0e58887bb71cb75228a1daedf059da65ea101e1ac2c
 merge_class_a_sh_usage: .opencode/scripts/merge-class-a.sh <pr-number>
-merge_method: squash (gh pr merge --squash --delete-branch)
+merge_method: squash (gh pr merge --squash)
 reserved_paths_regex: ^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$
 class_a_criteria: PR mergeable state is MERGEABLE; at least 5 checks reported and every reported check is SUCCESS or SKIPPED; no changed path matches reserved_paths_regex
-exit_code_0: merged (reached only after gh pr merge returned 0)
-exit_code_64: usage error (argument count not 1, or non-numeric PR number); technical failure; no merge attempted
-exit_code_1: ambiguous; used both for policy refusals (reserved path, not MERGEABLE, fewer than 5 checks, a non-SUCCESS/SKIPPED check) and for technical failures (gh missing, gh query failed, gh pr merge failed before or after the merge landed); treat as technical failure with unknown merge outcome (AGENTS.md §13.5 fail closed)
-exit_code_other: technical failure (unexpected error under set -e, timeout 124, killed 137); unknown merge outcome
+min_checks_reported: 5 (documentation only; the script hard-codes this floor and never reads it from here -- merge_class_a_sh_sha256 is what enforces the value)
+exit_code_0: merged
+exit_code_2: policy refusal
+exit_code_3: technical failure
+exit_code_64: usage error
+exit_code_other: technical failure (timeout 124, killed 137, any code not listed above); unknown merge outcome (AGENTS.md §13.5 fail closed)
 merge_enabled: false
