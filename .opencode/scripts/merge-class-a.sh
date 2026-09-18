@@ -8,8 +8,8 @@
 #
 # This is a safety NET, not a substitute for classifying the change
 # correctly at authoring time. A session should never reach for this script
-# believing the change is Class B. See .opencode/skills/autonomous-continuation
-# and AGENTS.md's Risk classes.
+# believing the change is Class B. See docs/adr/ADR-017-autonomous-continuation-policy.md
+# and AGENTS.md §10 (class recomputed from the diff), §13.5 and §13.6.
 #
 # Usage: merge-class-a.sh <pr-number>
 #
@@ -101,11 +101,20 @@ if printf '%s\n' "$states" | grep -qvE '^(SUCCESS|SKIPPED)$'; then
 fi
 
 # --- 3. Path screen: never auto-merge anything inherently non-Class-A ------
-# Migrations, deploy topology, the autonomy tooling itself, ADRs, the Plaid
-# and agent boundaries, and the documents that define these rules in the
-# first place all require a human's own gh pr merge click, however trivial
-# any individual line looks. This is what makes this very change permanently
-# ineligible for the mechanism it introduces.
+# Migrations, deploy topology, `.claude/`, ADRs, the Plaid and agent
+# boundaries, and the documents that define these rules in the first
+# place all require a human's own gh pr merge click, however trivial any
+# individual line looks.
+#
+# What the pattern does NOT cover, stated plainly so no one infers
+# otherwise from the list above: `.opencode/` -- this script,
+# plugins/guards.js and agents/ -- plus `opencode.json` and
+# `.orchestrator.example/`. A change confined to those paths passes this
+# screen, so a change to this very file is Class A by path and this
+# script would merge it. Widening the list is an owner-supervised change:
+# Appendix A.6 puts "any change to merge-class-a.sh reserved paths" out
+# of scope for an ordinary PR, and §5's pinned-hash check is the separate
+# mechanism that notices when this file moves.
 sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$'
 files=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null) ||
   fail "could not read changed files for PR #$pr"
