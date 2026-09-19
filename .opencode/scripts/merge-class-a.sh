@@ -137,12 +137,22 @@ esac
 # like one. That race is transient, so both gates below exit 3, never 2:
 # a state the script cannot yet evaluate is a technical failure, not a
 # deliberate refusal (AGENTS.md §14.2).
+#
+# The red-check test is a here-string for the same reason the path screen
+# is: as `printf ... | grep -qvE ...`, `grep -qv` exits at the first
+# non-green state, the writer takes SIGPIPE, `set -o pipefail` reports
+# 141, the `if` goes false and the bailout below is SKIPPED -- a red PR
+# merges. That fails open, so it is worse than the path screen's version
+# of the same bug. Measured: caught at 5002 reported states, missed at
+# 20002 and above. The two pipes around it are safe and stay: `grep -c`
+# and the `grep -vE | sort -u` both read to EOF, so neither ever signals
+# the writer, and both discard their status anyway.
 states=$(gh pr checks "$pr" --json state --jq '.[].state' 2>/dev/null) ||
   fail "could not read checks for PR #$pr"
 check_count=$(printf '%s\n' "$states" | grep -c . || true)
 (( check_count >= 5 )) ||
   fail "only $check_count checks reported for PR #$pr -- not yet complete, not a refusal"
-if printf '%s\n' "$states" | grep -qvE '^(SUCCESS|SKIPPED)$'; then
+if grep -qvE '^(SUCCESS|SKIPPED)$' <<<"$states"; then
   observed=$(printf '%s\n' "$states" | grep -vE '^(SUCCESS|SKIPPED)$' | sort -u | tr '\n' ' ' || true)
   echo "PR #$pr has a check that is not SUCCESS/SKIPPED:" >&2 || true
   gh pr checks "$pr" >&2 || true

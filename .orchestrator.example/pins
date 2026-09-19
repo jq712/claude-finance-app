@@ -1,7 +1,7 @@
 repo_root: /srv/code/agent-finance-app
 origin_url: https://github.com/jq712/claude-finance-app.git
 merge_class_a_sh_path: .opencode/scripts/merge-class-a.sh
-merge_class_a_sh_sha256: eeada620c7889f0df002e851a12a48ccbd38170f436707540b87e39409af70c7
+merge_class_a_sh_sha256: 7c696c70c8afdda5902fb2c2230b29824758efe41d82701ebc63c82a6d998839
 guards_js_path: .opencode/plugins/guards.js
 guards_js_sha256: 71450e945c79fcb2d57a95aec3173f1089a9650f13c668f86a03620b92bea3df
 opencode_json_path: opencode.json
