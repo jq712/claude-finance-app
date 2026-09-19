@@ -627,7 +627,7 @@ Immediately before invoking the script, checkpoint
 nowhere else. That record — never the PR's appearance — is what §16 uses to recognise an invocation
 whose outcome is unknown.
 
-Then run `timeout 900 merge-class-a.sh`. It is the independent enforcement boundary; its
+Then run `timeout 900 .opencode/scripts/merge-class-a.sh <n>`. It is the independent enforcement boundary; its
 reserved-path logic is never weakened and its hash is pinned (§5). Interpret its result **only** by
 the exit-code contract recorded in `.orchestrator/pins`, confirmed against the script in a
 supervised session:

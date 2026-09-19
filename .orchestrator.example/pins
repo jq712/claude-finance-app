@@ -7,7 +7,7 @@ guards_js_sha256: 71450e945c79fcb2d57a95aec3173f1089a9650f13c668f86a03620b92bea3
 opencode_json_path: opencode.json
 opencode_json_sha256: 6642e379e2abcd5b76b27bb92bbecd9428e83bae23b3275052e1967ec6b10530
 agents_md_path: AGENTS.md
-agents_md_sha256: 114735250d2db461b333d0e58887bb71cb75228a1daedf059da65ea101e1ac2c
+agents_md_sha256: 83971a7e52000a1f2658fd109270dfb190718e03042cd4bc11b6b515cde34983
 merge_class_a_sh_usage: .opencode/scripts/merge-class-a.sh <pr-number>
 merge_method: squash (gh pr merge --squash)
 reserved_paths_regex: ^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$
