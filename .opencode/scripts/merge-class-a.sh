@@ -75,28 +75,37 @@ command -v gh >/dev/null 2>&1 || fail "gh CLI not found"
 #
 # Migrations, deploy topology, `.claude/`, ADRs, the Plaid and agent
 # boundaries, the enforcement boundary itself -- `.opencode/` (this
-# script, plugins/guards.js, agents/) and `.orchestrator.example/` (the
-# pins template, which carries this file's own hash) -- and the documents
-# that define these rules in the first place all require a human's own
-# gh pr merge click, however trivial any individual line looks.
+# script, plugins/guards.js, agents/), `opencode.json` (the ask/allow
+# buckets that keep a bare `gh pr merge` behind a human) and
+# `.orchestrator.example/` (the pins template, which carries this file's
+# own hash) -- and the documents that define these rules in the first
+# place all require a human's own gh pr merge click, however trivial any
+# individual line looks.
 #
 # So a change touching these files is Class B by path and this script
 # will not merge it: the enforcement boundary cannot auto-merge a change
-# to itself or to its own configuration. Widening the list stays an
+# to itself or to its own configuration. The set is now closed over the
+# pins: every file §5 pins by hash -- this script, plugins/guards.js,
+# opencode.json, AGENTS.md -- is also reserved here, so the two
+# mechanisms cover the same files from two directions. The pin notices
+# one of them moving; this screen keeps it from moving through an
+# automatic merge in the first place. Widening the list stays an
 # owner-supervised change -- Appendix A.6 puts "any change to
-# merge-class-a.sh reserved paths" out of scope for an ordinary PR --
-# and §5's pinned-hash check is the separate mechanism that notices when
-# this file moves.
+# merge-class-a.sh reserved paths" out of scope for an ordinary PR.
 #
-# What the pattern still does NOT cover, stated plainly so no one infers
-# otherwise from the list above: the repo-root `opencode.json`. It is
-# pinned by hash alongside the files above, but this pattern matches it
-# neither by prefix nor by name, so a change confined to it passes this
-# screen.
-sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/|\.opencode/|\.orchestrator\.example/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$'
+# The test below is a here-string on purpose. Written as
+# `printf '%s\n' "$files" | grep -qE ...`, `grep -q` exits at the first
+# match, the writer takes SIGPIPE, and under `set -o pipefail` the
+# pipeline reports 141 -- so a matched reserved path in a large diff read
+# as NO match and the PR merged. Measured: it flipped somewhere above a
+# few thousand changed paths. Never reintroduce a pipe into this test.
+# The diagnostic `grep -E` below it keeps its pipe safely: without `-q`
+# it reads to EOF, so the writer is never signalled, and its status is
+# discarded anyway.
+sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/|\.opencode/|\.orchestrator\.example/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md|opencode\.json)$'
 files=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null) ||
   fail "could not read changed files for PR #$pr"
-if printf '%s\n' "$files" | grep -qE "$sensitive_pattern"; then
+if grep -qE "$sensitive_pattern" <<<"$files"; then
   echo "REFUSED: PR #$pr touches a path reserved for human-reviewed merge:" >&2 || true
   printf '%s\n' "$files" | grep -E "$sensitive_pattern" >&2 || true
   echo "This is Class B (or workflow-tooling) by path, whatever class it was implemented under. Leave it open for the owner." >&2 || true
