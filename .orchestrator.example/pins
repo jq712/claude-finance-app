@@ -1,7 +1,7 @@
 repo_root: /srv/code/agent-finance-app
 origin_url: https://github.com/jq712/claude-finance-app.git
 merge_class_a_sh_path: .opencode/scripts/merge-class-a.sh
-merge_class_a_sh_sha256: 1150a34a33747187714a8fce1c9195f4c46234bfe7957c26474e10e1d3d5f919
+merge_class_a_sh_sha256: 7c696c70c8afdda5902fb2c2230b29824758efe41d82701ebc63c82a6d998839
 guards_js_path: .opencode/plugins/guards.js
 guards_js_sha256: 71450e945c79fcb2d57a95aec3173f1089a9650f13c668f86a03620b92bea3df
 opencode_json_path: opencode.json
@@ -10,8 +10,8 @@ agents_md_path: AGENTS.md
 agents_md_sha256: 83971a7e52000a1f2658fd109270dfb190718e03042cd4bc11b6b515cde34983
 merge_class_a_sh_usage: .opencode/scripts/merge-class-a.sh <pr-number>
 merge_method: squash (gh pr merge --squash)
-reserved_paths_regex: ^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$
-class_a_criteria: PR mergeable state is MERGEABLE; at least 5 checks reported and every reported check is SUCCESS or SKIPPED; no changed path matches reserved_paths_regex
+reserved_paths_regex: ^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/|\.opencode/|\.orchestrator\.example/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md|opencode\.json)$
+class_a_criteria: evaluated in this order -- no changed path matches reserved_paths_regex; PR mergeable state is MERGEABLE; at least 5 checks reported and every reported check is SUCCESS or SKIPPED
 min_checks_reported: 5 (documentation only; the script hard-codes this floor and never reads it from here -- merge_class_a_sh_sha256 is what enforces the value)
 exit_code_0: merged
 exit_code_2: policy refusal

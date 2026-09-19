@@ -22,10 +22,10 @@
 #       pattern, or mergeable is CONFLICTING. Both depend only on the
 #       PR's changed files and the branch/base relationship, so neither
 #       is transient: they persist until the branch or base changes.
-#       Re-running returns 2 only if the gates ahead of the failing one
-#       still pass -- the path screen runs third, so a reserved-path PR
-#       whose checks have not all reported returns 3, not 2. No merge
-#       was attempted.
+#       The path screen runs FIRST, ahead of both transient gates, so a
+#       reserved-path PR returns 2 whatever its mergeable state and
+#       however few of its checks have reported; CONFLICTING is reached
+#       only once the path screen has passed. No merge was attempted.
 #   3   technical failure -- a command the script depends on failed or
 #       produced unreadable output (gh missing, gh error, network,
 #       auth), or the PR's state is not yet determinable (mergeable not
@@ -63,7 +63,56 @@ fail() {
 
 command -v gh >/dev/null 2>&1 || fail "gh CLI not found"
 
-# --- 1. No conflicts, nothing stale ----------------------------------------
+# --- 1. Path screen: never auto-merge anything inherently non-Class-A ------
+# This runs FIRST, ahead of the mergeable and check gates, because a
+# reserved path is a permanent property of the PR's diff while those two
+# gates are transient. Run later, the screen let a mid-flight check turn
+# a standing refusal (2) into a not-yet (3) and hid the fact that no
+# amount of waiting would make the PR auto-mergeable. It needs only
+# `gh pr view --json files` and reads nothing the later gates compute,
+# so a reserved-path PR now exits 2 whatever its mergeable state and
+# however few of its checks have reported.
+#
+# Migrations, deploy topology, `.claude/`, ADRs, the Plaid and agent
+# boundaries, the enforcement boundary itself -- `.opencode/` (this
+# script, plugins/guards.js, agents/), `opencode.json` (the ask/allow
+# buckets that keep a bare `gh pr merge` behind a human) and
+# `.orchestrator.example/` (the pins template, which carries this file's
+# own hash) -- and the documents that define these rules in the first
+# place all require a human's own gh pr merge click, however trivial any
+# individual line looks.
+#
+# So a change touching these files is Class B by path and this script
+# will not merge it: the enforcement boundary cannot auto-merge a change
+# to itself or to its own configuration. The set is now closed over the
+# pins: every file §5 pins by hash -- this script, plugins/guards.js,
+# opencode.json, AGENTS.md -- is also reserved here, so the two
+# mechanisms cover the same files from two directions. The pin notices
+# one of them moving; this screen keeps it from moving through an
+# automatic merge in the first place. Widening the list stays an
+# owner-supervised change -- Appendix A.6 puts "any change to
+# merge-class-a.sh reserved paths" out of scope for an ordinary PR.
+#
+# The test below is a here-string on purpose. Written as
+# `printf '%s\n' "$files" | grep -qE ...`, `grep -q` exits at the first
+# match, the writer takes SIGPIPE, and under `set -o pipefail` the
+# pipeline reports 141 -- so a matched reserved path in a large diff read
+# as NO match and the PR merged. Measured: it flipped somewhere above a
+# few thousand changed paths. Never reintroduce a pipe into this test.
+# The diagnostic `grep -E` below it keeps its pipe safely: without `-q`
+# it reads to EOF, so the writer is never signalled, and its status is
+# discarded anyway.
+sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/|\.opencode/|\.orchestrator\.example/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md|opencode\.json)$'
+files=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null) ||
+  fail "could not read changed files for PR #$pr"
+if grep -qE "$sensitive_pattern" <<<"$files"; then
+  echo "REFUSED: PR #$pr touches a path reserved for human-reviewed merge:" >&2 || true
+  printf '%s\n' "$files" | grep -E "$sensitive_pattern" >&2 || true
+  echo "This is Class B (or workflow-tooling) by path, whatever class it was implemented under. Leave it open for the owner." >&2 || true
+  exit 2
+fi
+
+# --- 2. No conflicts, nothing stale ----------------------------------------
 mergeable=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null) ||
   fail "could not read PR #$pr (does it exist?)"
 case "$mergeable" in
@@ -72,7 +121,7 @@ case "$mergeable" in
   *)           fail "PR #$pr mergeable state is '$mergeable', not yet computed or unreadable" ;;
 esac
 
-# --- 2. Every reported check is green, and enough checks were reported -----
+# --- 3. Every reported check is green, and enough checks were reported -----
 # SKIPPED is accepted because ci.yml's ten jobs do not all run on every PR:
 # production-deploy is gated on push to main, and docs-freshness only runs
 # for a PR whose base is main. On a pull_request that does not match, each
@@ -88,41 +137,26 @@ esac
 # like one. That race is transient, so both gates below exit 3, never 2:
 # a state the script cannot yet evaluate is a technical failure, not a
 # deliberate refusal (AGENTS.md §14.2).
+#
+# The red-check test is a here-string for the same reason the path screen
+# is: as `printf ... | grep -qvE ...`, `grep -qv` exits at the first
+# non-green state, the writer takes SIGPIPE, `set -o pipefail` reports
+# 141, the `if` goes false and the bailout below is SKIPPED -- a red PR
+# merges. That fails open, so it is worse than the path screen's version
+# of the same bug. Measured: caught at 5002 reported states, missed at
+# 20002 and above. The two pipes around it are safe and stay: `grep -c`
+# and the `grep -vE | sort -u` both read to EOF, so neither ever signals
+# the writer, and both discard their status anyway.
 states=$(gh pr checks "$pr" --json state --jq '.[].state' 2>/dev/null) ||
   fail "could not read checks for PR #$pr"
 check_count=$(printf '%s\n' "$states" | grep -c . || true)
 (( check_count >= 5 )) ||
   fail "only $check_count checks reported for PR #$pr -- not yet complete, not a refusal"
-if printf '%s\n' "$states" | grep -qvE '^(SUCCESS|SKIPPED)$'; then
+if grep -qvE '^(SUCCESS|SKIPPED)$' <<<"$states"; then
   observed=$(printf '%s\n' "$states" | grep -vE '^(SUCCESS|SKIPPED)$' | sort -u | tr '\n' ' ' || true)
   echo "PR #$pr has a check that is not SUCCESS/SKIPPED:" >&2 || true
   gh pr checks "$pr" >&2 || true
   fail "PR #$pr check state(s) ${observed% } -- not yet complete or not green, not a refusal"
-fi
-
-# --- 3. Path screen: never auto-merge anything inherently non-Class-A ------
-# Migrations, deploy topology, `.claude/`, ADRs, the Plaid and agent
-# boundaries, and the documents that define these rules in the first
-# place all require a human's own gh pr merge click, however trivial any
-# individual line looks.
-#
-# What the pattern does NOT cover, stated plainly so no one infers
-# otherwise from the list above: `.opencode/` -- this script,
-# plugins/guards.js and agents/ -- plus `opencode.json` and
-# `.orchestrator.example/`. A change confined to those paths passes this
-# screen, so a change to this very file is Class A by path and this
-# script would merge it. Widening the list is an owner-supervised change:
-# Appendix A.6 puts "any change to merge-class-a.sh reserved paths" out
-# of scope for an ordinary PR, and §5's pinned-hash check is the separate
-# mechanism that notices when this file moves.
-sensitive_pattern='^(migrations/versions/|deploy/|\.claude/|docs/adr/|src/finance_app/plaid/|src/finance_app/agent/)|^(CLAUDE\.md|AGENTS\.md|CLAUDE_FINANCE_APP_HANDOFF\.md|docs/security-model\.md)$'
-files=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null) ||
-  fail "could not read changed files for PR #$pr"
-if printf '%s\n' "$files" | grep -qE "$sensitive_pattern"; then
-  echo "REFUSED: PR #$pr touches a path reserved for human-reviewed merge:" >&2 || true
-  printf '%s\n' "$files" | grep -E "$sensitive_pattern" >&2 || true
-  echo "This is Class B (or workflow-tooling) by path, whatever class it was implemented under. Leave it open for the owner." >&2 || true
-  exit 2
 fi
 
 echo "PR #$pr: mergeable, $check_count checks reported and green, no reserved paths touched." ||
