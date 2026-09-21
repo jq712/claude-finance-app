@@ -1,0 +1,45 @@
+# Server-side mirror of .opencode/scripts/merge-class-a.sh's reserved-path list.
+#
+# The reserved paths are defined by `reserved_paths_regex` in .orchestrator.example/pins,
+# byte-identical to `sensitive_pattern` in merge-class-a.sh. This file is the GitHub-side
+# enforcement of the same list: a PR touching any path below requires @jq712 review before
+# the ruleset on main will let it merge. The two lists MUST stay in sync.
+#
+# Entries present in BOTH the regex and this file (mapping is regex -> CODEOWNERS glob):
+#   migrations/versions/            -> /migrations/versions/
+#   deploy/                         -> /deploy/
+#   .claude/                        -> /.claude/
+#   docs/adr/                       -> /docs/adr/
+#   src/finance_app/plaid/          -> /src/finance_app/plaid/
+#   src/finance_app/agent/          -> /src/finance_app/agent/
+#   .opencode/                      -> /.opencode/
+#   .orchestrator.example/          -> /.orchestrator.example/
+#   CLAUDE.md                       -> /CLAUDE.md
+#   AGENTS.md                       -> /AGENTS.md
+#   CLAUDE_FINANCE_APP_HANDOFF.md   -> /CLAUDE_FINANCE_APP_HANDOFF.md
+#   docs/security-model.md          -> /docs/security-model.md
+#   opencode.json                   -> /opencode.json
+#
+# Entries present ONLY here, not in the regex (known gap — the regex must be widened to match):
+#   /.github/            (the CI workflow is the enforcement signal the ruleset trusts)
+#   /.github/CODEOWNERS  (this file itself; must not change without owner review)
+#
+# Entries present ONLY in the regex, not here: none.
+#
+# When either list changes, update the other in the same change.
+
+/migrations/versions/       @jq712
+/deploy/                    @jq712
+/.claude/                   @jq712
+/docs/adr/                  @jq712
+/src/finance_app/plaid/     @jq712
+/src/finance_app/agent/     @jq712
+/.opencode/                 @jq712
+/.orchestrator.example/     @jq712
+/CLAUDE.md                  @jq712
+/AGENTS.md                  @jq712
+/CLAUDE_FINANCE_APP_HANDOFF.md  @jq712
+/docs/security-model.md     @jq712
+/opencode.json              @jq712
+/.github/                   @jq712
+/.github/CODEOWNERS         @jq712
